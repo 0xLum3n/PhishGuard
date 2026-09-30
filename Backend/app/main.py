@@ -2,20 +2,55 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI,Response,status,HTTPException
-import whois
-import os
-from pydantic import BaseModel
+from starlette.middleware.cors import (CORSMiddleware)
+from ..app.api.routes.analysis import router as analysis_router
 
-from .services.supabase_service import save_domain_scan
+app = FastAPI(
+    title="PhishGuard API",
+    description="PhishGuard URL Analysis Backend",
+    version="0.1.0"
+)
 
-SUPABASE_URL : str = os.environ.get("SUPABASE_URL","")
-SUPABASE_KEY : str = os.environ.get("SUPABASE_KEY","")
-app = FastAPI()
+#---------------------------------------
+# CORS Middleware
+#---------------------------------------
 
-@app.get("/")
-def root():
-    return {"Message":"Database is Running !"}
+app.add_middleware( # type : ignore
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://localhost:5173",
+        "https://127.0.0.1:5173",
+        "http://localhost:8443",
+        "http://127.0.0.1:8443",
+        "https://localhost:8443",
+        "https://127.0.0.1:8443",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-class DomainRequest(BaseModel):
-    domain : str
 
+# ---------------------------------------------------------
+# Routes
+# ---------------------------------------------------------
+
+app.include_router(
+    analysis_router,
+    prefix="/api",
+)
+
+
+# ---------------------------------------------------------
+# Health check
+# ---------------------------------------------------------
+
+@app.get("/api/health")
+async def health_check():
+    return {
+        "status": "ok",
+        "service": "PhishGuard API",
+        "version": "0.1.0",
+    }
