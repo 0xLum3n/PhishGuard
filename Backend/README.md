@@ -1,59 +1,42 @@
-# Mail Sentinel 2.0 Backend
+# PhishGuard Backend
 
-FastAPI backend for Mail Sentinel 2.0: AI-powered email threat detection, phishing analysis, forensic investigation, threat intelligence, reporting, and SOC assistance.
+FastAPI backend for the PhishGuard URL Analysis Engine.
 
-## Planned stack
+## Current Phase
 
-- FastAPI
-- PostgreSQL
-- SQLAlchemy 2.x
-- Alembic
-- Redis
-- Pydantic Settings
-- AI provider abstraction
+Step 1 — URL Parsing
 
-## Development
+The current backend performs:
 
-Create a virtual environment, install the dependencies from `requirements.txt`, copy `.env.example` to `.env`, configure PostgreSQL/Redis, and then start the FastAPI application.
+- URL validation
+- Scheme extraction
+- Username extraction
+- Password extraction
+- Subdomain extraction
+- Hostname extraction
+- Domain extraction
+- Registrable domain extraction
+- TLD extraction
+- Port extraction
+- Path extraction
+- Query extraction
+- Query parameter extraction
+- Duplicate query parameter handling
+- Fragment extraction
+- IP address detection
+- IPv4 support
+- IPv6 support
+- Basic URL normalization
 
-Implementation is being built incrementally and validated layer-by-layer.
+External intelligence is NOT performed yet.
 
-## Current API foundation
+No WHOIS, DNS, IP geolocation, OSINT or threat scoring is performed in Step 1.
 
-Base API prefix: `/api/v1`
+---
 
-Authentication endpoints:
+## Setup
 
-- `POST /api/v1/auth/register`
-- `POST /api/v1/auth/login`
-- `POST /api/v1/auth/refresh`
-- `POST /api/v1/auth/logout`
-- `GET /api/v1/auth/me` (Bearer access token required)
+Create a virtual environment:
 
-Authentication uses short-lived JWT access tokens and persisted, rotated opaque refresh tokens. Refresh tokens are stored only as SHA-256 hashes in PostgreSQL.
-
-
-## AI-assisted analysis
-
-Set `AI_PROVIDER=openai` (or `openai-compatible`), `AI_MODEL`, `AI_API_KEY`, and optionally `AI_BASE_URL`. The analysis endpoint sends structured email evidence, deterministic findings, IOC reputation evidence, and attachment metadata to the configured model. The model response is validated against a strict Pydantic schema. AI failures fail closed and do not discard deterministic or threat-intelligence results.
-
-AI risk is combined conservatively: the final risk score cannot be lower than the deterministic + threat-intelligence evidence score. AI findings are persisted separately with `source=ai`, and the full AI reasoning/recommended actions are retained in analysis metadata.
-
-## AI SOC Analyst chat
-
-The authenticated SOC Analyst API is scoped to the current organization and can bind a conversation to one email investigation:
-
-- `GET /api/v1/ai/context/{email_id}`
-- `POST /api/v1/ai/chat`
-
-The chat service builds a model-safe investigation context from the stored email, latest analysis, findings, indicators, threat-intelligence enrichment, MITRE mappings, headers, and attachment metadata. Client messages can contain only `user` or `assistant` roles; system instructions are server-controlled. The backend limits history and evidence size before sending it to the AI provider. AI provider failures return `503` from the API without exposing provider error details.
-
-Example request:
-
-```json
-{
-  "email_id": "00000000-0000-0000-0000-000000000000",
-  "message": "Why is this investigation high risk, and what should I do next?",
-  "history": []
-}
-```
+```bash
+python -m venv .venv

@@ -10,32 +10,57 @@ from urllib.parse import (
     urlunsplit,
 )
 
+import tldextract
+
 from app.schemas.response import QueryParameter, URLParts
 
-# ---------------------------------------------------------
+
+# =========================================================
 # Constants
-# ---------------------------------------------------------
+# =========================================================
 
 SUPPORTED_SCHEMES = {
     "http",
     "https",
 }
 
-DEFAULT_PORTS = {
-    "http": 80,
-    "https": 443,
-}
 
-# ---------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------
+# =========================================================
+# Public Suffix List extractor
+# =========================================================
+#
+# tldextract uses the Public Suffix List rather than a
+# manually maintained list such as:
+#
+#     co.uk
+#     co.in
+#     com.au
+#
+# This gives us much more reliable domain boundaries.
+#
+# We keep private suffixes disabled for now because we want
+# the normal ICANN/public suffix interpretation.
+#
+# fallback_to_snapshot=True means the package can still work
+# from its bundled PSL snapshot if the live list cannot be
+# downloaded.
+# =========================================================
+
+TLD_EXTRACTOR = tldextract.TLDExtract(
+    include_psl_private_domains=False,
+    fallback_to_snapshot=True,
+)
+
+
+# =========================================================
+# Input handling
+# =========================================================
 
 def _clean_input(url: str) -> str:
     """
-    Clean only accidental surrounding whitespace.
+    Remove only accidental surrounding whitespace.
 
-    We deliberately do NOT aggressively modify the URL because
-    security analysis should preserve the user's original input.
+    We deliberately preserve the actual URL structure.
     """
 
     if not isinstance(url, str):
@@ -51,9 +76,10 @@ def _clean_input(url: str) -> str:
 
 def _has_explicit_scheme(url: str) -> bool:
     """
-    Determine whether the URL contains a scheme.
+    Check whether the input explicitly contains a scheme.
 
-    Example:
+    Examples:
+
         https://example.com -> True
         http://example.com  -> True
         example.com         -> False
@@ -69,36 +95,38 @@ def _has_explicit_scheme(url: str) -> bool:
 
 def _normalize_input(url: str) -> str:
     """
-    Normalize the minimum amount necessary for parsing.
+    Prepare input for urllib.urlsplit().
 
-    If the user enters:
+    If the user supplies:
 
         example.com/login
 
-    we temporarily prepend https:// so urlsplit() interprets
-    example.com as a hostname.
+    we temporarily interpret it as:
 
-    The original input remains untouched and is returned separately.
+        https://example.com/login
+
+    The original input is preserved separately.
     """
 
     if _has_explicit_scheme(url):
         return url
 
-    # Reject protocol-relative URLs as direct analysis targets.
     if url.startswith("//"):
         raise ValueError(
             "Protocol-relative URLs are not supported. "
-            "Provide http:// or https:// explicitly."
+            "Please provide http:// or https:// explicitly."
         )
 
     return f"https://{url}"
 
 
+# =========================================================
+# Scheme
+# =========================================================
+
 def _validate_scheme(scheme: str) -> str:
     """
-    Validate the URL scheme.
-
-    PhishGuard's URL checker currently focuses on HTTP/HTTPS URLs.
+    Currently PhishGuard analyzes HTTP/HTTPS URLs.
     """
 
     scheme = scheme.lower()
@@ -106,15 +134,21 @@ def _validate_scheme(scheme: str) -> str:
     if scheme not in SUPPORTED_SCHEMES:
         raise ValueError(
             f"Unsupported URL scheme '{scheme}'. "
-            f"Only HTTP and HTTPS URLs are supported."
+            "Only HTTP and HTTPS URLs are supported."
         )
 
     return scheme
 
 
-def _validate_hostname(hostname: str | None) -> str:
+# =========================================================
+# Hostname
+# =========================================================
+
+def _validate_hostname(
+    hostname: str | None,
+) -> str:
     """
-    Validate that a hostname exists and is structurally usable.
+    Validate and normalize the hostname.
     """
 
     if not hostname:
@@ -129,8 +163,7 @@ def _validate_hostname(hostname: str | None) -> str:
             "URL hostname is empty."
         )
 
-    # Hostnames cannot contain whitespace.
-    if any(char.isspace() for char in hostname):
+    if any(character.isspace() for character in hostname):
         raise ValueError(
             "Hostname cannot contain whitespace."
         )
@@ -140,133 +173,144 @@ def _validate_hostname(hostname: str | None) -> str:
 
 def _is_ip_address(hostname: str) -> bool:
     """
-    Return True when hostname is an IPv4 or IPv6 address.
+    Detect IPv4 and IPv6 addresses.
     """
 
     try:
         ipaddress.ip_address(hostname)
         return True
+
     except ValueError:
         return False
 
 
 def _validate_ip_address(hostname: str) -> None:
     """
-    Validate IP addresses explicitly.
+    Validate IPv6-like values that contain ':'.
 
-    This catches malformed IP-like hostnames while allowing
-    normal domain names.
+    IPv4 addresses are handled naturally by ipaddress.
     """
 
     if _is_ip_address(hostname):
         return
 
-    # If it contains ':' it may be attempting to be IPv6.
     if ":" in hostname:
         raise ValueError(
             "Invalid IPv6 address."
         )
 
 
+# =========================================================
+# Domain extraction
+# =========================================================
+
 def _split_domain(
     hostname: str,
-) -> tuple[str | None, str | None, str | None]:
+) -> tuple[
+    str | None,
+    str | None,
+    str | None,
+    str | None,
+]:
     """
-    Split hostname into:
+    Split a hostname using the Public Suffix List.
+
+    Returns:
 
         subdomain
-        registrable domain
-        TLD
+        registrable_domain
+        domain
+        public_suffix
 
-    This implementation handles common multi-label public suffixes
-    such as:
+    Example:
 
-        co.uk
-        com.au
-        co.in
-        org.uk
-        gov.uk
+        login.account.example.com
 
-    It is intentionally conservative. A proper Public Suffix List
-    integration can be added later when we make domain intelligence
-    more advanced.
+    becomes:
+
+        subdomain          = login.account
+        registrable_domain = example.com
+        domain             = example
+        public_suffix      = com
     """
 
+    # -----------------------------------------------------
+    # IP addresses do not have domains/TLDs.
+    # -----------------------------------------------------
+
     if _is_ip_address(hostname):
-        return None, hostname, None
-
-    labels = hostname.split(".")
-
-    if len(labels) < 2:
-        return None, hostname, None
-
-    known_multi_label_suffixes = {
-        "co.uk",
-        "org.uk",
-        "gov.uk",
-        "ac.uk",
-
-        "co.in",
-        "firm.in",
-        "net.in",
-        "org.in",
-        "gen.in",
-        "ind.in",
-
-        "com.au",
-        "net.au",
-        "org.au",
-
-        "co.nz",
-        "net.nz",
-        "org.nz",
-
-        "co.jp",
-        "ne.jp",
-        "or.jp",
-
-        "com.br",
-        "net.br",
-
-        "co.za",
-        "org.za",
-    }
-
-    last_two = ".".join(labels[-2:])
-
-    if last_two in known_multi_label_suffixes:
-
-        if len(labels) < 3:
-            return None, hostname, last_two
-
-        registrable_domain = ".".join(labels[-3:])
-
-        subdomain = ".".join(labels[:-3])
 
         return (
-            subdomain or None,
-            registrable_domain,
-            last_two,
+            None,
+            hostname,
+            hostname,
+            None,
         )
 
-    tld = labels[-1]
+    # -----------------------------------------------------
+    # Extract using PSL.
+    # -----------------------------------------------------
 
-    registrable_domain = ".".join(labels[-2:])
+    extracted = TLD_EXTRACTOR(hostname)
 
-    subdomain = ".".join(labels[:-2])
+    subdomain = extracted.subdomain or None
 
-    return (
-        subdomain or None,
-        registrable_domain,
-        tld,
+    domain = extracted.domain or None
+
+    public_suffix = extracted.suffix or None
+
+    registrable_domain = (
+        extracted.top_domain_under_public_suffix
+        or None
     )
 
+    # -----------------------------------------------------
+    # Unknown/unlisted suffix
+    # -----------------------------------------------------
+    #
+    # For example:
+    #
+    #     something.internal
+    #
+    # If PSL doesn't recognize the suffix, we don't pretend
+    # that "internal" is a valid public TLD.
+    # -----------------------------------------------------
+
+    if not public_suffix:
+
+        if domain is None:
+
+            return (
+                subdomain,
+                None,
+                None,
+                None,
+            )
+
+        return (
+            subdomain,
+            None,
+            domain,
+            None,
+        )
+
+    return (
+        subdomain,
+        registrable_domain,
+        domain,
+        public_suffix,
+    )
+
+
+# =========================================================
+# Query parameters
+# =========================================================
 
 def _parse_query_parameters(
     query: str | None,
 ) -> list[QueryParameter]:
     """
-    Parse query parameters while preserving duplicate parameters.
+    Parse query parameters while preserving duplicates.
 
     Example:
 
@@ -274,8 +318,8 @@ def _parse_query_parameters(
 
     becomes:
 
-        id -> values [1, 2]
-        lang -> values [en]
+        id   -> [1, 2]
+        lang -> [en]
     """
 
     if not query:
@@ -294,6 +338,7 @@ def _parse_query_parameters(
     for name, value in pairs:
 
         decoded_name = unquote(name)
+
         decoded_value = unquote(value)
 
         grouped.setdefault(
@@ -316,6 +361,10 @@ def _parse_query_parameters(
     return parameters
 
 
+# =========================================================
+# URL reconstruction
+# =========================================================
+
 def _normalize_url(
     scheme: str,
     username: str | None,
@@ -327,9 +376,9 @@ def _normalize_url(
     fragment: str | None,
 ) -> str:
     """
-    Produce a normalized URL for internal use.
+    Reconstruct a normalized URL.
 
-    This does not replace the original URL.
+    This is separate from `original`.
     """
 
     userinfo = ""
@@ -352,15 +401,17 @@ def _normalize_url(
 
         userinfo += "@"
 
-    # IPv6 hosts need brackets when reconstructed.
+    # IPv6 must be surrounded by brackets in a URL.
     host_for_url = hostname
 
     if ":" in hostname and not hostname.startswith("["):
+
         host_for_url = f"[{hostname}]"
 
     netloc = f"{userinfo}{host_for_url}"
 
     if port is not None:
+
         netloc += f":{port}"
 
     return urlunsplit(
@@ -374,76 +425,123 @@ def _normalize_url(
     )
 
 
-# ---------------------------------------------------------
-# Public parser
-# ---------------------------------------------------------
+# =========================================================
+# Main parser
+# =========================================================
 
 def parse_url(
     original_url: str,
 ) -> URLParts:
     """
-    Parse and validate a URL into security-relevant components.
+    Parse a URL into security-relevant components.
     """
 
-    original = _clean_input(original_url)
+    original = _clean_input(
+        original_url
+    )
 
-    normalized_input = _normalize_input(original)
+    normalized_input = _normalize_input(
+        original
+    )
+
+    # -----------------------------------------------------
+    # Parse URL syntax
+    # -----------------------------------------------------
 
     try:
+
         parsed = urlsplit(
-            normalized_input,
+            normalized_input
         )
 
     except ValueError as exc:
+
         raise ValueError(
             f"Invalid URL structure: {exc}"
         ) from exc
+
+    # -----------------------------------------------------
+    # Scheme
+    # -----------------------------------------------------
 
     scheme = _validate_scheme(
         parsed.scheme
     )
 
+    # -----------------------------------------------------
+    # Hostname
+    # -----------------------------------------------------
+
     hostname = _validate_hostname(
         parsed.hostname
     )
 
-    _validate_ip_address(hostname)
+    _validate_ip_address(
+        hostname
+    )
 
-    # Accessing parsed.port can itself raise ValueError for
-    # malformed/out-of-range ports.
+    # -----------------------------------------------------
+    # Port
+    # -----------------------------------------------------
+
     try:
+
         port = parsed.port
+
     except ValueError as exc:
+
         raise ValueError(
             f"Invalid port: {exc}"
         ) from exc
 
-    # Explicit default ports remain explicit.
-    #
-    # https://example.com:443
-    #
-    # should return 443 because the user supplied it.
-    #
-    # https://example.com
-    #
-    # returns None because no explicit port was supplied.
+    # -----------------------------------------------------
+    # Credentials
+    # -----------------------------------------------------
 
     username = parsed.username
+
     password = parsed.password
 
-    subdomain, registrable_domain, tld = _split_domain(
+    # -----------------------------------------------------
+    # Domain information
+    # -----------------------------------------------------
+
+    (
+        subdomain,
+        registrable_domain,
+        domain,
+        public_suffix,
+    ) = _split_domain(
         hostname
     )
 
-    query = parsed.query or None
-
-    fragment = parsed.fragment or None
+    # -----------------------------------------------------
+    # Path
+    # -----------------------------------------------------
 
     path = parsed.path or "/"
 
-    query_parameters = _parse_query_parameters(
-        query
+    # -----------------------------------------------------
+    # Query
+    # -----------------------------------------------------
+
+    query = parsed.query or None
+
+    query_parameters = (
+        _parse_query_parameters(
+            query
+        )
     )
+
+    # -----------------------------------------------------
+    # Fragment
+    # -----------------------------------------------------
+
+    fragment = parsed.fragment or None
+
+    # -----------------------------------------------------
+    # Normalized URL
+    # -----------------------------------------------------
 
     normalized = _normalize_url(
         scheme=scheme,
@@ -456,6 +554,10 @@ def parse_url(
         fragment=fragment,
     )
 
+    # -----------------------------------------------------
+    # Final response object
+    # -----------------------------------------------------
+
     return URLParts(
         original=original,
 
@@ -464,17 +566,18 @@ def parse_url(
         scheme=scheme,
 
         username=username,
+
         password=password,
 
         subdomain=subdomain,
 
         hostname=hostname,
 
-        domain=registrable_domain,
+        domain=domain,
 
         registrable_domain=registrable_domain,
 
-        tld=tld,
+        tld=public_suffix,
 
         port=port,
 

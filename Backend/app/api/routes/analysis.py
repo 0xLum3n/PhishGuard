@@ -16,18 +16,21 @@ router = APIRouter(
     response_model=AnalysisResponse,
     status_code=status.HTTP_200_OK,
 )
-async def analyze(request: AnalyzeRequest,):
+async def analyze(
+    request: AnalyzeRequest,
+):
     """
     Analyze a URL.
-
-    Step 1:
-        Validate and decompose the URL.
     """
 
     try:
-        return analyze_url(request.url)
+
+        return await analyze_url(
+            request.url
+        )
 
     except ValueError as exc:
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
