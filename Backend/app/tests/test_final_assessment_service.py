@@ -39,6 +39,8 @@ def test_urlhaus_match_produces_confirmed_threat_evidence():
     )
 
     assert result.verdict == "confirmed_threat_evidence"
+    assert result.risk_score >= 50
+    assert result.risk_score_version == "evidence-v1"
     assert result.confidence == "medium"
     assert "URLhaus" in result.evidence_summary["direct_threat_intel"]["sources"]
 
@@ -139,6 +141,7 @@ def test_actionable_findings_produce_suspicious_indicators():
     )
 
     assert result.verdict == "suspicious_indicators"
+    assert result.risk_score >= 15
     assert result.confidence == "high"
 
 

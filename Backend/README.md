@@ -73,3 +73,8 @@ The tests cover URL parsing, DNS, IP intelligence, WHOIS/RDAP, OSINT providers/s
 ## Local frontend connection
 
 The API allows loopback browser origins for local development. The bundled Vite frontend also proxies `/api` to `http://127.0.0.1:8000`, so local browser requests do not require cross-origin access.
+
+
+## Risk index
+
+`final_assessment.risk_score` is a deterministic 0–100 evidence visualization generated from collected findings and threat-intelligence matches. It is not a probability and is versioned as `evidence-v1`; `risk_factors` exposes the contribution breakdown used by the frontend.

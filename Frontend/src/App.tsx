@@ -342,6 +342,11 @@ interface BackendAnalysisResponse {
     status: 'completed'
     verdict: 'confirmed_threat_evidence' | 'suspicious_indicators' | 'no_significant_evidence' | 'inconclusive'
     confidence: 'low' | 'medium' | 'high'
+    risk_score: number
+    risk_score_version?: string
+    risk_factors?: Record<string, unknown>
+    risk_dimensions?: Record<string, number>
+    risk_events?: Array<Record<string, unknown>>
     summary: string
     rationale: string[]
     evidence_summary: Record<string, unknown>
@@ -631,13 +636,13 @@ const SAMPLE_URLS = [
 
 // Inspection Steps for Scanner Flow
 const SCAN_STEPS = [
-  { id: '01', name: 'Inspecting URL Structure', desc: 'Protocol, Host, Subdomains, Query Tokens' },
-  { id: '02', name: 'Checking Domain & TLD', desc: 'Syntax validation, DNS origin structure' },
-  { id: '03', name: 'Detecting Typosquatting', desc: 'Brand imitation, leet-speak & edit distance' },
-  { id: '04', name: 'Detecting Homoglyphs', desc: 'Unicode lookalike and Cyrillic character scanner' },
-  { id: '05', name: 'Analyzing Shannon Entropy', desc: 'Randomness metrics & payload obfuscation' },
-  { id: '06', name: 'Inspecting URL Path & Query', desc: 'Credential harvesting keywords & hex encoding' },
-  { id: '07', name: 'Querying Network Intelligence', desc: 'DNS resolution, RDAP registration & IP geolocation' },
+  { id: '01', name: 'Parsing URL structure', desc: 'Scheme, domain hierarchy, port, path & query' },
+  { id: '02', name: 'Resolving DNS', desc: 'A, AAAA, CNAME, MX, NS & TXT context' },
+  { id: '03', name: 'Enriching IP addresses', desc: 'Public/private classification and geolocation' },
+  { id: '04', name: 'Querying RDAP', desc: 'Registration dates, registrar & DNSSEC' },
+  { id: '05', name: 'Checking OSINT sources', desc: 'PhishTank, URLhaus and urlscan evidence' },
+  { id: '06', name: 'Analyzing security findings', desc: 'URL, DNS, IP, WHOIS, OSINT & correlations' },
+  { id: '07', name: 'Building final assessment', desc: 'Evidence summary, confidence & coverage' },
 ]
 
 // SVG Icons & UI Graphics
@@ -2491,6 +2496,747 @@ function ScannerPage({
 // --------------------------------------------------------------------------
 // PAGE 2: ANALYSIS PAGE (/analysis)
 // --------------------------------------------------------------------------
+type AssessmentVerdict = NonNullable<BackendAnalysisResponse['final_assessment']>['verdict']
+
+function assessmentLabel(verdict?: AssessmentVerdict): string {
+  switch (verdict) {
+    case 'confirmed_threat_evidence': return 'Confirmed threat evidence'
+    case 'suspicious_indicators': return 'Suspicious indicators'
+    case 'no_significant_evidence': return 'No significant evidence'
+    default: return 'Inconclusive'
+  }
+}
+
+function assessmentTone(verdict?: AssessmentVerdict): 'safe' | 'suspicious' | 'threat' | 'neutral' {
+  switch (verdict) {
+    case 'no_significant_evidence': return 'safe'
+    case 'suspicious_indicators': return 'suspicious'
+    case 'confirmed_threat_evidence': return 'threat'
+    default: return 'neutral'
+  }
+}
+
+function humanizeToken(value: string): string {
+  return value.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
+function severityRank(severity: BackendSecurityFinding['severity']): number {
+  return ({ high: 4, medium: 3, low: 2, info: 1 } as Record<string, number>)[severity] || 0
+}
+
+function formatFindingEvidence(evidence?: Record<string, unknown>): string[] {
+  if (!evidence) return []
+  return Object.entries(evidence).flatMap(([key, value]) => {
+    if (value === null || value === undefined || value === '') return []
+    if (Array.isArray(value)) return [`${humanizeToken(key)}: ${value.map(String).join(', ')}`]
+    if (typeof value === 'object') return [`${humanizeToken(key)}: ${JSON.stringify(value)}`]
+    return [`${humanizeToken(key)}: ${String(value)}`]
+  })
+}
+
+function isLikelySensitiveParam(name: string): boolean {
+  return /^(access[_-]?token|api[_-]?key|auth(?:orization)?|code|credential|id[_-]?token|otp|pass(?:word|wd)?|pin|refresh[_-]?token|secret|session(?:id)?|sid|token)$/i.test(name.trim())
+}
+
+function displayQueryParamValue(param: { name: string; value: string; values: string[] }): string {
+  return isLikelySensitiveParam(param.name) ? '••••••••' : (param.value || '(empty)')
+}
+
+function UrlPartsRibbon({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const url = raw.url
+  let maskedQuery = url.query || ''
+  try {
+    const masked = new URL(maskUrlForDisplay(url.original || url.normalized, url.query_parameters || [], url.has_credentials))
+    maskedQuery = masked.search.replace(/^\?/, '')
+  } catch {
+    maskedQuery = (url.query_parameters || []).map(param => `${param.name}=${displayQueryParamValue(param)}`).join('&')
+  }
+  const query = maskedQuery ? `?${maskedQuery}` : '?'
+  const fragment = url.fragment ? `#${url.fragment}` : '#—'
+  const pieces = [
+    { key: 'scheme', label: 'Scheme', value: `${url.scheme}://`, tone: 'scheme' },
+    { key: 'subdomain', label: 'Subdomain', value: url.subdomain ? `${url.subdomain}.` : '—', tone: 'subdomain' },
+    { key: 'domain', label: 'Domain', value: url.domain || url.registrable_domain || url.hostname, tone: 'domain' },
+    { key: 'tld', label: 'Top Level Domain', value: url.tld ? `.${url.tld.replace(/^\./, '')}` : '—', tone: 'tld' },
+    { key: 'port', label: 'Port Number', value: url.port ? `:${url.port}` : '—', tone: 'port' },
+    { key: 'path', label: 'Path', value: url.path || '/', tone: 'path' },
+    { key: 'separator', label: 'Query Separator', value: url.query ? '?' : '—', tone: 'separator' },
+    { key: 'query', label: 'Query String / Parameters', value: maskedQuery || '—', tone: 'query' },
+    { key: 'fragment', label: 'Fragment', value: url.fragment ? `#${url.fragment}` : '—', tone: 'fragment' },
+  ]
+
+  return (
+    <div className="url-parts-visual-shell">
+      <div className="url-parts-visual-head">
+        <div>
+          <span className="analysis-eyebrow">01 · URL DECOMPOSITION</span>
+          <h3>Every component of the submitted address.</h3>
+        </div>
+        <span className="analysis-mini-badge">Backend parsed</span>
+      </div>
+      <div className="url-original-bar">
+        <span>Submitted URL</span>
+        <code>{maskUrlForDisplay(url.original, url.query_parameters || [], url.has_credentials)}</code>
+      </div>
+      <div className="url-parts-ribbon" role="list" aria-label="Parsed URL parts">
+        {pieces.map(piece => (
+          <div className={`url-part-cell url-part-${piece.tone}`} key={piece.key} role="listitem">
+            <span className="url-part-label">{piece.label}</span>
+            <code title={piece.value}>{piece.value}</code>
+          </div>
+        ))}
+      </div>
+      <div className="url-meta-strip">
+        <span><strong>Normalized:</strong> <code>{url.normalized}</code></span>
+        <span><strong>Credentials:</strong> {url.has_credentials ? 'Present (redacted)' : 'None detected'}</span>
+        <span><strong>Query params:</strong> {url.query_parameters?.length || 0}</span>
+        <span><strong>Fragment:</strong> {url.has_fragment ? 'Present' : 'None'}</span>
+      </div>
+    </div>
+  )
+}
+
+function DnsRecordsTable({ records, title }: { records?: Record<string, { record_type: string; queried_name: string; status: string; records: string[]; error?: string | null }>; title: string }): React.ReactElement | null {
+  const entries = Object.entries(records || {})
+  if (!entries.length) return null
+  return (
+    <div className="dns-record-block">
+      <div className="subsection-title">{title}</div>
+      <div className="dns-record-grid">
+        {entries.map(([type, record]) => (
+          <div className="dns-record-card" key={`${title}-${type}`}>
+            <div className="dns-record-top">
+              <span className="code-badge">{type}</span>
+              <span className={`provider-state state-${record.status}`}>{humanizeToken(record.status)}</span>
+            </div>
+            <code className="dns-query-name">{record.queried_name}</code>
+            {record.records?.length ? (
+              <div className="dns-values">
+                {record.records.map((value, index) => <code key={`${value}-${index}`}>{value}</code>)}
+              </div>
+            ) : (
+              <span className="empty-inline">{record.error || 'No records returned'}</span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function IpIntelCard({ result }: { result: BackendAnalysisResponse['ip_intelligence']['results'][number] }): React.ReactElement {
+  const geo = [result.city, result.region, result.country_name].filter(Boolean).join(', ') || 'Geolocation unavailable'
+  return (
+    <article className="intel-card ip-intel-card">
+      <div className="intel-card-top">
+        <div>
+          <span className="analysis-eyebrow">IP {result.version}</span>
+          <h4><code>{result.ip}</code></h4>
+        </div>
+        <span className={`ip-class-chip ip-${result.classification}`}>{humanizeToken(result.classification)}</span>
+      </div>
+      <div className="intel-data-grid">
+        <div><span>Lookup</span><strong>{humanizeToken(result.status)}</strong></div>
+        <div><span>Country</span><strong>{geo}</strong></div>
+        <div><span>ASN</span><strong>{result.asn || 'Not published'}</strong></div>
+        <div><span>Organization</span><strong>{result.organization || 'Not published'}</strong></div>
+        <div><span>Timezone</span><strong>{result.timezone || 'Not published'}</strong></div>
+        <div><span>Coordinates</span><strong>{result.latitude != null && result.longitude != null ? `${result.latitude}, ${result.longitude}` : 'Not published'}</strong></div>
+      </div>
+      {result.hostname && <div className="intel-footline"><span>Reverse hostname</span><code>{result.hostname}</code></div>}
+      {result.error && <div className="intel-warning">{result.error}</div>}
+    </article>
+  )
+}
+
+function ProviderStatusCard({ provider }: { provider: BackendOSINTProvider }): React.ReactElement {
+  const providerLabel = provider.source || 'Unknown provider'
+  const matched = provider.matched || provider.match_count > 0
+  const stateClass = matched ? 'provider-hit' : provider.status === 'no_match' ? 'provider-clean' : 'provider-neutral'
+  return (
+    <article className={`osint-provider-card ${stateClass}`}>
+      <div className="provider-card-top">
+        <div>
+          <span className="provider-name">{providerLabel}</span>
+          <span className="provider-query">{provider.query}</span>
+        </div>
+        <span className={`provider-state state-${provider.status}`}>{humanizeToken(provider.status)}</span>
+      </div>
+      <div className="provider-metrics">
+        <span><strong>{provider.match_count}</strong> match{provider.match_count === 1 ? '' : 'es'}</span>
+        {provider.metadata && Object.keys(provider.metadata).length > 0 && <span>{Object.keys(provider.metadata).length} metadata fields</span>}
+      </div>
+      {provider.error && <div className="provider-error">{provider.error}</div>}
+      {provider.matches?.length > 0 && (
+        <div className="provider-match-list">
+          {provider.matches.slice(0, 4).map((match, index) => (
+            <div className="provider-match-item" key={`${match.indicator}-${index}`}>
+              <span className="match-type">{humanizeToken(match.match_type)}</span>
+              <code>{match.indicator}</code>
+              {match.reference && /^https?:\/\//i.test(match.reference) && (
+                <a href={match.reference} target="_blank" rel="noopener noreferrer">Reference ↗</a>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </article>
+  )
+}
+
+function SecurityFindingsSection({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const groups: Array<{ title: string; result?: BackendSecurityResult | null }> = [
+    { title: 'URL structure', result: raw.security },
+    { title: 'DNS security', result: raw.dns_security },
+    { title: 'IP intelligence', result: raw.ip_security },
+    { title: 'WHOIS / RDAP', result: raw.whois_security },
+    { title: 'OSINT evidence', result: raw.osint_security },
+    { title: 'Cross-source correlation', result: raw.correlation_security },
+  ]
+  const findings = groups.flatMap(group => (group.result?.findings || []).map(f => ({ ...f, group: group.title })))
+    .sort((a, b) => severityRank(b.severity) - severityRank(a.severity))
+
+  return (
+    <section className="analysis-section-card findings-section">
+      <div className="section-card-header">
+        <div>
+          <span className="analysis-eyebrow">06 · SECURITY EVIDENCE</span>
+          <h3>Explainable findings, grouped by analysis layer.</h3>
+        </div>
+        <span className="analysis-count-badge">{findings.length} findings</span>
+      </div>
+      {findings.length === 0 ? (
+        <div className="empty-report-state"><span className="empty-check">✓</span><div><strong>No actionable security findings returned.</strong><p>The backend completed the security layers without reporting a concrete finding.</p></div></div>
+      ) : (
+        <div className="finding-list">
+          {findings.map((finding, index) => (
+            <details className={`finding-row finding-${finding.severity}`} key={`${finding.rule_id}-${index}`} open={index < 3}>
+              <summary>
+                <span className={`severity-dot severity-${finding.severity}`} />
+                <div className="finding-summary-copy">
+                  <strong>{finding.title}</strong>
+                  <span>{finding.group} · {humanizeToken(finding.category)}</span>
+                </div>
+                <span className="finding-rule">{finding.rule_id}</span>
+              </summary>
+              <div className="finding-detail-body">
+                <p>{finding.description}</p>
+                {formatFindingEvidence(finding.evidence).map((line, idx) => <code key={idx}>{line}</code>)}
+                <span className="finding-confidence">Confidence: {humanizeToken(finding.confidence)}</span>
+              </div>
+            </details>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function normalizeDisplayData(value: unknown, parentKey = ''): unknown {
+  if (value === null || value === undefined) return value
+  if (Array.isArray(value)) {
+    return value.map(item => normalizeDisplayData(item, parentKey))
+  }
+  if (typeof value !== 'object') {
+    return value
+  }
+
+  const output: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const lowered = key.toLowerCase()
+    if (['password', 'passwd', 'authorization', 'access_token', 'refresh_token', 'api_key', 'apikey', 'secret'].includes(lowered)) {
+      output[key] = child ? '••••••••' : child
+      continue
+    }
+    output[key] = normalizeDisplayData(child, key)
+  }
+  if ('name' in (value as Record<string, unknown>) && 'value' in (value as Record<string, unknown>)) {
+    const name = String((value as Record<string, unknown>).name || '')
+    if (isLikelySensitiveParam(name)) {
+      if ('value' in output) output.value = '••••••••'
+      if ('values' in output) output.values = ['••••••••']
+    }
+  }
+  return output
+}
+
+function displayLeaf(value: unknown): string {
+  if (value === null || value === undefined) return '—'
+  if (typeof value === 'string') return value || '""'
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  return String(value)
+}
+
+function JsonTree({ value, depth = 0 }: { value: unknown; depth?: number }): React.ReactElement {
+  if (value === null || value === undefined || typeof value !== 'object') {
+    return <code className="json-tree-leaf">{displayLeaf(value)}</code>
+  }
+  if (Array.isArray(value)) {
+    return (
+      <div className="json-tree-array">
+        {value.length === 0 ? <code className="json-tree-empty">[]</code> : value.map((item, index) => (
+          <div className="json-tree-entry" key={`${depth}-${index}`}>
+            <span className="json-tree-index">{index}</span>
+            <JsonTree value={item} depth={depth + 1} />
+          </div>
+        ))}
+      </div>
+    )
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+  return (
+    <div className="json-tree-object">
+      {entries.length === 0 ? <code className="json-tree-empty">{'{}'}</code> : entries.map(([key, child]) => (
+        <div className="json-tree-row" key={`${depth}-${key}`}>
+          <span className="json-tree-key">{humanizeToken(key)}</span>
+          <div className="json-tree-value"><JsonTree value={child} depth={depth + 1} /></div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function riskTone(score: number): 'safe' | 'suspicious' | 'threat' {
+  if (score <= 20) return 'safe'
+  if (score <= 60) return 'suspicious'
+  return 'threat'
+}
+
+const RISK_DIMENSION_LABELS: Record<string, string> = {
+  direct_threat_intel: 'Direct threat intelligence',
+  url_structure: 'URL structure',
+  dns: 'DNS intelligence',
+  ip_geolocation: 'IP & geolocation',
+  whois_rdap: 'WHOIS / RDAP',
+  osint: 'OSINT analysis findings',
+  osint_context: 'OSINT context',
+  cross_source_correlation: 'Cross-source correlation',
+}
+
+function formatRiskDimension(key: string): string {
+  return RISK_DIMENSION_LABELS[key] || humanizeToken(key)
+}
+
+function RiskSignalGraph({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const dimensions = Object.entries(raw.final_assessment?.risk_dimensions || {})
+    .filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
+    .map(([key, value]) => ({ key, value: Math.max(0, Math.min(100, Number(value))) }))
+    .sort((a, b) => b.value - a.value)
+
+  const [animated, setAnimated] = useState<Record<string, number>>({})
+
+  useEffect(() => {
+    let frame = 0
+    const start = performance.now()
+    const duration = 1100
+    const from = Object.fromEntries(dimensions.map(item => [item.key, 0]))
+    setAnimated(from)
+    if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setAnimated(Object.fromEntries(dimensions.map(item => [item.key, item.value])))
+      return
+    }
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration)
+      const eased = 1 - Math.pow(1 - t, 3)
+      const next: Record<string, number> = {}
+      dimensions.forEach(item => { next[item.key] = item.value * eased })
+      setAnimated(next)
+      if (t < 1) frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [raw.final_assessment?.risk_score, JSON.stringify(raw.final_assessment?.risk_dimensions || {})])
+
+  if (!dimensions.length) {
+    return <div className="risk-signal-empty">No risk dimensions were returned by the backend for this scan.</div>
+  }
+
+  return (
+    <div className="risk-signal-graph">
+      <div className="risk-signal-graph-header">
+        <div><span className="analysis-eyebrow">LIVE EVIDENCE DISTRIBUTION</span><strong>{dimensions.length} live dimensions</strong></div>
+        <span className="risk-live-badge"><i /> BACKEND</span>
+      </div>
+      <div className="risk-signal-list">
+        {dimensions.map(item => {
+          const current = animated[item.key] ?? 0
+          return (
+            <div className="risk-signal-row" key={item.key}>
+              <div className="risk-signal-label"><span>{formatRiskDimension(item.key)}</span><strong>{Math.round(current)}/100</strong></div>
+              <div className="risk-signal-track"><span style={{ width: `${current}%` }} /></div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function RiskEvidenceContributors({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const events = (raw.final_assessment?.risk_events || [])
+    .filter(event => typeof event?.points === 'number' && Number(event.points) > 0)
+    .slice(0, 5)
+  return (
+    <div className="risk-contributor-panel">
+      <div className="analysis-eyebrow">TOP LIVE RISK CONTRIBUTORS</div>
+      {events.length ? events.map((event, index) => (
+        <div className="risk-contributor-row" key={`${String(event.rule_id || event.signal || 'event')}-${index}`}>
+          <span>{String(event.source || 'backend').replace(/_/g, ' ')}</span>
+          <p>{String(event.title || event.signal || event.rule_id || 'Evidence signal')}</p>
+          <strong>+{Number(event.points)}</strong>
+        </div>
+      )) : (
+        <p className="risk-contributor-empty">No weighted risk contributors were returned. Informational evidence can still appear in the five intelligence panels without increasing the index.</p>
+      )}
+    </div>
+  )
+}
+
+function RiskGauge({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const target = Math.max(0, Math.min(100, Number(raw.final_assessment?.risk_score ?? 0)))
+  const [displayed, setDisplayed] = useState(0)
+  const radius = 88
+  const stroke = 13
+  const circumference = 2 * Math.PI * (radius - stroke / 2)
+  const dash = circumference - (displayed / 100) * circumference
+  const tone = riskTone(target)
+
+  useEffect(() => {
+    let frame = 0
+    const start = performance.now()
+    const duration = 1500
+    if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setDisplayed(target)
+      return
+    }
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration)
+      const eased = 1 - Math.pow(1 - t, 4)
+      setDisplayed(Math.round(target * eased))
+      if (t < 1) frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [target])
+
+  return (
+    <div className={`risk-gauge risk-gauge-${tone}`}>
+      <div className="risk-gauge-orbit">
+        <div className="risk-gauge-scan-beam" aria-hidden="true" />
+        <svg viewBox="0 0 220 220" className="risk-gauge-svg" aria-label={`Backend risk index ${target} out of 100`}>
+          <circle cx="110" cy="110" r={radius - stroke / 2} fill="none" className="risk-gauge-track" strokeWidth={stroke} />
+          <circle cx="110" cy="110" r={radius - stroke / 2} fill="none" className="risk-gauge-value" strokeWidth={stroke} strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={dash} />
+        </svg>
+        <div className="risk-gauge-center">
+          <strong>{displayed}</strong>
+          <span>/ 100</span>
+          <small>RISK INDEX</small>
+          <em>LIVE BACKEND SCORE</em>
+        </div>
+      </div>
+      <div className="risk-scale"><span>0–20</span><span>21–60</span><span>61–100</span></div>
+      <RiskEvidenceContributors raw={raw} />
+    </div>
+  )
+}
+
+function compactSummaryForCard(kind: string, raw: BackendAnalysisResponse): Array<[string, string]> {
+  switch (kind) {
+    case 'url':
+      return [
+        ['Hostname', raw.url.hostname],
+        ['Domain', raw.url.registrable_domain || raw.url.domain || '—'],
+        ['Path', raw.url.path || '/'],
+        ['Query params', String(raw.url.query_parameters?.length || 0)],
+      ]
+    case 'dns':
+      return [
+        ['Status', humanizeToken(raw.dns.status)],
+        ['Resolved IPs', String(raw.dns.resolved_ips.length)],
+        ['Hostname records', String(Object.keys(raw.dns.hostname_records || {}).length)],
+        ['Domain records', String(Object.keys(raw.dns.domain_records || {}).length)],
+      ]
+    case 'ip':
+      return [
+        ['Total IPs', String(raw.ip_intelligence.total_ips)],
+        ['Public IPs', String(raw.ip_intelligence.public_ips)],
+        ['Enriched IPs', String(raw.ip_intelligence.enriched_ips)],
+        ['Lookup status', humanizeToken(raw.ip_intelligence.status)],
+      ]
+    case 'whois':
+      return [
+        ['Domain', raw.whois?.domain || raw.url.registrable_domain || '—'],
+        ['Registrar', raw.whois?.registrar_name || 'Not published'],
+        ['Created', raw.whois?.registration_date ? formatDate(raw.whois.registration_date) : 'Not published'],
+        ['DNSSEC', raw.whois?.dnssec || 'Not published'],
+      ]
+    case 'osint':
+      return [
+        ['Providers', String(raw.osint?.providers?.length || 0)],
+        ['Matches', String(raw.osint?.total_matches || 0)],
+        ['Status', humanizeToken(raw.osint?.status || 'unavailable')],
+        ['Configured', String(raw.osint?.providers?.filter(p => p.status !== 'not_configured').length || 0)],
+      ]
+    default:
+      return []
+  }
+}
+
+function AnalysisDataCard({
+  number,
+  title,
+  eyebrow,
+  kind,
+  raw,
+  payload,
+}: {
+  number: string
+  title: string
+  eyebrow: string
+  kind: string
+  raw: BackendAnalysisResponse
+  payload: Record<string, unknown>
+}): React.ReactElement {
+  const [expanded, setExpanded] = useState(false)
+  const summary = compactSummaryForCard(kind, raw)
+  const safePayload = normalizeDisplayData(payload)
+  return (
+    <article className={`analysis-data-card analysis-data-card-${kind} ${expanded ? 'is-expanded' : ''}`}>
+      <div className="data-card-topline">
+        <span className="data-card-number">{number}</span>
+        <span className="analysis-eyebrow">{eyebrow}</span>
+      </div>
+      <div className="data-card-title-row">
+        <h3>{title}</h3>
+        <span className="data-card-live-dot" />
+      </div>
+      <div className="data-card-summary-grid">
+        {summary.map(([label, value]) => (
+          <div className="data-card-summary-item" key={label}>
+            <span>{label}</span>
+            <strong title={value}>{value}</strong>
+          </div>
+        ))}
+      </div>
+      <button type="button" className="data-card-expand-btn" onClick={() => setExpanded(v => !v)} aria-expanded={expanded}>
+        <span>{expanded ? 'Collapse complete response' : 'Show complete response'}</span>
+        <span className={`data-card-chevron ${expanded ? 'rotated' : ''}`}>↓</span>
+      </button>
+      <div className={`data-card-json ${expanded ? 'data-card-json-open' : ''}`}>
+        <JsonTree value={safePayload} />
+      </div>
+    </article>
+  )
+}
+
+function AssessmentHero({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const assessment = raw.final_assessment
+  const score = Math.max(0, Math.min(100, Number(assessment?.risk_score ?? 0)))
+  const tone = riskTone(score)
+  const findings = collectBackendFindings(raw)
+  const high = findings.filter(f => f.severity === 'high').length
+  const medium = findings.filter(f => f.severity === 'medium').length
+  const matches = raw.osint?.total_matches || 0
+  const weightedEvents = (assessment?.risk_events || []).filter(event => Number(event.points || 0) > 0).length
+  const correlation = raw.correlation_security || { status: 'not_returned' }
+
+  return (
+    <section className={`analysis-risk-hero analysis-risk-tone-${tone}`}>
+      <div className="risk-hero-main">
+        <div className="assessment-topline">
+          <span className="live-dot" />
+          <span>FINAL EVIDENCE ASSESSMENT</span>
+          <span className="assessment-generated">Backend-derived · {assessment?.risk_score_version || 'risk index'}</span>
+        </div>
+        <div className="risk-hero-grid">
+          <div className="risk-hero-copy">
+            <div className="risk-hero-badges">
+              <span className="risk-verdict-badge">{assessmentLabel(assessment?.verdict)}</span>
+              <span className="assessment-confidence">{humanizeToken(assessment?.confidence || 'low')} confidence</span>
+            </div>
+            <h2>{raw.url.hostname}</h2>
+            <code className="risk-hero-url">{maskUrlForDisplay(raw.url.original, raw.url.query_parameters || [], raw.url.has_credentials)}</code>
+            <p className="assessment-summary">{assessment?.summary || 'No final assessment was returned.'}</p>
+            <div className="risk-metric-strip">
+              <div><strong>{findings.length}</strong><span>Total findings</span></div>
+              <div><strong>{high}</strong><span>High severity</span></div>
+              <div><strong>{medium}</strong><span>Medium severity</span></div>
+              <div><strong>{matches}</strong><span>OSINT matches</span></div>
+            </div>
+            <div className="risk-explanation-panel">
+              <div className="risk-explanation-heading"><span className="analysis-eyebrow">HOW THE LIVE INDEX WAS DERIVED</span><span>{weightedEvents} weighted contributors</span></div>
+              <p>The backend calculates this 0–100 evidence index from the current scan's security findings, direct threat-intelligence matches, contextual OSINT and cross-source correlation. It is not a probability.</p>
+              <RiskSignalGraph raw={raw} />
+            </div>
+          </div>
+          <RiskGauge raw={raw} />
+        </div>
+      </div>
+      <div className="risk-hero-rationale">
+        <div className="analysis-eyebrow">WHY THE ENGINE LANDED HERE</div>
+        {(assessment?.rationale || []).length ? (assessment?.rationale || []).map((item, index) => (
+          <div className="rationale-row" key={index}><span>{String(index + 1).padStart(2, '0')}</span><p>{item}</p></div>
+        )) : <p className="rationale-empty">No rationale items were returned.</p>}
+        <details className="hero-correlation-details">
+          <summary>Show correlation-security payload</summary>
+          <JsonTree value={normalizeDisplayData(correlation)} />
+        </details>
+        <details className="hero-correlation-details">
+          <summary>Show complete risk-engine payload</summary>
+          <JsonTree value={normalizeDisplayData({ risk_score: assessment?.risk_score, risk_dimensions: assessment?.risk_dimensions, risk_factors: assessment?.risk_factors, risk_events: assessment?.risk_events })} />
+        </details>
+      </div>
+    </section>
+  )
+}
+
+// Lightweight native PDF generator so users can download a self-contained report
+// without adding a heavy browser-side PDF dependency.
+function downloadAnalysisPdf(raw: BackendAnalysisResponse): void {
+  const esc = (value: string) => value.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)').replace(/[^\x20-\x7E]/g, '?')
+  const wrap = (value: string, max = 92): string[] => {
+    const words = value.split(/\s+/)
+    const lines: string[] = []
+    let line = ''
+    for (const word of words) {
+      if (!word) continue
+      const candidate = line ? `${line} ${word}` : word
+      if (candidate.length > max && line) { lines.push(line); line = word }
+      else line = candidate
+    }
+    if (line) lines.push(line)
+    return lines.length ? lines : ['']
+  }
+
+  type PdfLine = { text: string; size: number; bold?: boolean; gapAfter?: number }
+  const pages: PdfLine[][] = [[]]
+  const push = (line: PdfLine) => {
+    const page = pages[pages.length - 1]
+    const currentChars = page.length
+    if (currentChars > 44) pages.push([])
+    pages[pages.length - 1].push(line)
+  }
+  const paragraph = (text: string, size = 10, bold = false) => wrap(text).forEach((line, index, arr) => push({ text: line, size, bold, gapAfter: index === arr.length - 1 ? 5 : 0 }))
+  const heading = (text: string) => { if (pages[pages.length - 1].length) pages.push([]); push({ text, size: 16, bold: true, gapAfter: 8 }) }
+
+  push({ text: 'PHISHGUARD', size: 22, bold: true, gapAfter: 4 })
+  push({ text: 'URL intelligence report', size: 13, gapAfter: 15 })
+  paragraph(`Submitted: ${raw.url.original}`)
+  paragraph(`Normalized: ${raw.url.normalized}`)
+  paragraph(`Assessment: ${assessmentLabel(raw.final_assessment?.verdict)} / ${raw.final_assessment?.confidence || 'unknown'} confidence`, 11, true)
+  paragraph(`Risk index: ${raw.final_assessment?.risk_score ?? 0}/100 (${raw.final_assessment?.risk_score_version || 'evidence-derived'})`, 11, true)
+  paragraph(`Risk factors: ${JSON.stringify(raw.final_assessment?.risk_factors || {})}`)
+  paragraph(`Risk dimensions: ${JSON.stringify(raw.final_assessment?.risk_dimensions || {})}`)
+  paragraph(`Top contributors: ${JSON.stringify(raw.final_assessment?.risk_events || [])}`)
+  paragraph(raw.final_assessment?.summary || 'No summary returned.')
+
+  heading('01  URL decomposition')
+  const u = raw.url
+  const parts = [
+    ['Scheme', `${u.scheme}://`], ['Subdomain', u.subdomain || '-'], ['Domain', u.domain || u.registrable_domain || u.hostname],
+    ['TLD', u.tld || '-'], ['Port', u.port ? String(u.port) : 'Default / not explicit'], ['Path', u.path || '/'],
+    ['Query', u.query || '-'], ['Fragment', u.fragment || '-'], ['Credentials', u.has_credentials ? 'Present (redacted)' : 'None'],
+  ]
+  parts.forEach(([k, v]) => paragraph(`${k}: ${isLikelySensitiveParam(k) ? '********' : v}`))
+  if (u.query_parameters?.length) {
+    paragraph('Query parameters:', 10, true)
+    u.query_parameters.forEach(q => paragraph(`  ${q.name} = ${displayQueryParamValue(q)}`))
+  }
+
+  heading('02  DNS intelligence')
+  paragraph(`Status: ${humanizeToken(raw.dns.status)}`)
+  paragraph(`Resolved IPs: ${raw.dns.resolved_ips.join(', ') || 'None returned'}`)
+  Object.entries(raw.dns.hostname_records || {}).forEach(([type, record]) => paragraph(`${type}: ${record.records.join(', ') || record.error || record.status}`))
+  Object.entries(raw.dns.domain_records || {}).forEach(([type, record]) => paragraph(`Domain ${type}: ${record.records.join(', ') || record.error || record.status}`))
+
+  heading('03  IP intelligence & geolocation')
+  raw.ip_intelligence.results.forEach(ip => {
+    paragraph(`${ip.ip} (${ip.version}) - ${humanizeToken(ip.classification)} - ${humanizeToken(ip.status)}`, 10, true)
+    paragraph(`Location: ${[ip.city, ip.region, ip.country_name].filter(Boolean).join(', ') || 'Not published'} | ASN: ${ip.asn || '-'} | Org: ${ip.organization || '-'}`)
+    paragraph(`Coordinates: ${ip.latitude ?? '-'}, ${ip.longitude ?? '-'} | Timezone: ${ip.timezone || '-'}`)
+  })
+
+  heading('04  WHOIS / RDAP')
+  if (raw.whois) {
+    paragraph(`Domain: ${raw.whois.domain}`)
+    paragraph(`Status: ${humanizeToken(raw.whois.status)}`)
+    paragraph(`Registrar: ${raw.whois.registrar_name || 'Not published'}`)
+    paragraph(`Registered: ${raw.whois.registration_date || 'Not published'}`)
+    paragraph(`Expires: ${raw.whois.expiration_date || 'Not published'}`)
+    paragraph(`Updated: ${raw.whois.last_updated_date || 'Not published'}`)
+    paragraph(`DNSSEC: ${raw.whois.dnssec || 'Not published'} | Redacted: ${raw.whois.redacted ? 'Yes' : 'No'}`)
+    paragraph(`Nameservers: ${(raw.whois.nameservers || []).map(n => n.hostname).join(', ') || 'Not published'}`)
+  } else paragraph('WHOIS / RDAP data was not available for this analysis.')
+
+  heading('05  OSINT')
+  ;(raw.osint?.providers || []).forEach(provider => {
+    paragraph(`${provider.source}: ${humanizeToken(provider.status)} | ${provider.match_count} matches`, 10, true)
+    provider.matches.slice(0, 8).forEach(match => paragraph(`  ${humanizeToken(match.match_type)}: ${match.indicator}`))
+  })
+
+  heading('06  Security findings')
+  const findingSets = [raw.security, raw.dns_security, raw.ip_security, raw.whois_security, raw.osint_security, raw.correlation_security]
+  const allFindings = findingSets.flatMap(r => r?.findings || []).sort((a,b) => severityRank(b.severity)-severityRank(a.severity))
+  if (!allFindings.length) paragraph('No actionable security findings were returned.')
+  allFindings.forEach((f, i) => {
+    paragraph(`${i + 1}. [${f.severity.toUpperCase()}] ${f.title}`, 10, true)
+    paragraph(f.description)
+    formatFindingEvidence(f.evidence).slice(0, 3).forEach(e => paragraph(`  ${e}`))
+  })
+
+  heading('07  Assessment rationale & coverage')
+  ;(raw.final_assessment?.rationale || []).forEach(r => paragraph(`- ${r}`))
+  paragraph(`Coverage: ${JSON.stringify(raw.final_assessment?.coverage || {})}`)
+  paragraph(`Evidence summary: ${JSON.stringify(raw.final_assessment?.evidence_summary || {})}`)
+  paragraph('Generated by PhishGuard. This report reflects evidence returned at analysis time and does not execute the destination webpage.')
+
+  // Construct a classic PDF 1.4 document using only ASCII primitives.
+  const objects: string[] = []
+  const addObject = (body: string) => { objects.push(body); return objects.length }
+  const fontRegular = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
+  const fontBold = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>')
+  const pageIds: number[] = []
+
+  for (const pageLines of pages) {
+    let y = 748
+    const commands: string[] = []
+    commands.push('q 0.95 0.93 0.88 rg 40 726 532 1 re f Q')
+    for (const line of pageLines) {
+      if (y < 50) break
+      const font = line.bold ? '/F2' : '/F1'
+      commands.push(`BT ${font} ${line.size} Tf 0.08 0.08 0.07 rg 40 ${y} Td (${esc(line.text)}) Tj ET`)
+      y -= line.size + 5 + (line.gapAfter || 0)
+    }
+    const stream = commands.join('\n')
+    const contentId = addObject(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`)
+    const pageId = addObject(`<< /Type /Page /Parent PAGES /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${fontRegular} 0 R /F2 ${fontBold} 0 R >> >> /Contents ${contentId} 0 R >>`)
+    pageIds.push(pageId)
+  }
+
+  const pagesId = addObject(`<< /Type /Pages /Count ${pageIds.length} /Kids [${pageIds.map(id => `${id} 0 R`).join(' ')}] >>`)
+  const patchedObjects = objects.map(obj => obj.replaceAll('PAGES', `${pagesId} 0 R`))
+  objects.splice(0, objects.length, ...patchedObjects)
+  const catalogId = addObject(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`)
+
+  let pdf = '%PDF-1.4\n%\xFF\xFF\xFF\xFF\n'
+  const offsets: number[] = [0]
+  for (let i = 0; i < objects.length; i++) {
+    offsets[i + 1] = new TextEncoder().encode(pdf).length
+    pdf += `${i + 1} 0 obj\n${objects[i]}\nendobj\n`
+  }
+  const xrefOffset = new TextEncoder().encode(pdf).length
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
+  for (let i = 1; i <= objects.length; i++) pdf += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`
+
+  const blob = new Blob([pdf], { type: 'application/pdf' })
+  const anchor = document.createElement('a')
+  anchor.href = URL.createObjectURL(blob)
+  anchor.download = `phishguard-report-${new Date().toISOString().replace(/[:.]/g, '-')}.pdf`
+  anchor.click()
+  setTimeout(() => URL.revokeObjectURL(anchor.href), 1000)
+}
+
 function AnalysisPage({
   activeUrl,
   analysisState,
@@ -2501,95 +3247,61 @@ function AnalysisPage({
 }: {
   activeUrl: string | null
   analysisState: ScanState
-  analysisResult: AnalysisDetails | null
+  analysisResult: BackendAnalysisResponse | null
   analysisError?: string | null
   onStartInspection: (url: string) => void
   onResetScan: () => void
 }) {
   const [activeStepIndex, setActiveStepIndex] = useState(0)
-  const [scanProgress, setScanProgress] = useState(0)
+  const [scanProgress, setScanProgress] = useState(4)
 
-  // The scanning sequence is visual only. The actual request is started
-  // immediately by the parent when the user clicks "Inspect URL".
   useEffect(() => {
     if (analysisState !== 'scanning' || !activeUrl) return
-
     setActiveStepIndex(0)
-    setScanProgress(5)
-
-    const stepInterval = 260
-    const totalSteps = SCAN_STEPS.length
-    let currentStep = 0
-
+    setScanProgress(4)
+    let current = 0
     const timer = setInterval(() => {
-      currentStep++
-      if (currentStep < totalSteps) {
-        setActiveStepIndex(currentStep)
-        setScanProgress(Math.min(95, Math.round((currentStep / totalSteps) * 100)))
-      } else {
-        clearInterval(timer)
-        setScanProgress(95)
-      }
-    }, stepInterval)
-
+      current += 1
+      setActiveStepIndex(Math.min(SCAN_STEPS.length - 1, current))
+      setScanProgress(Math.min(92, Math.round((current / SCAN_STEPS.length) * 92)))
+      if (current >= SCAN_STEPS.length - 1) clearInterval(timer)
+    }, 650)
     return () => clearInterval(timer)
   }, [analysisState, activeUrl])
 
   return (
     <div className="page-view analysis-page-view">
       <section className="section analysis-hub-section">
-        <div className="section-container">
-          {/* Header */}
+        <div className="section-container analysis-container">
           <div className="section-intro reveal-stagger-1">
-            <span className="editorial-eyebrow">ANALYSIS &amp; THREAT INTELLIGENCE</span>
-            <h2 className="section-title">Security intelligence for the URL you're inspecting.</h2>
-            <p className="section-subtitle">
-              Deterministic analysis across character encoding, domain reputation, lexical entropy, and URL semantics.
-            </p>
+            <span className="editorial-eyebrow">LIVE URL INSPECTION / ANALYSIS DOSSIER</span>
+            <h2 className="section-title">See the URL. See the evidence. Understand the verdict.</h2>
+            <p className="section-subtitle">PhishGuard turns one suspicious link into a visual intelligence report across URL structure, DNS, IP geolocation, RDAP and external threat-intelligence evidence.</p>
           </div>
 
-          {/* Reused Live URL Inspector Card at the Top of Analysis */}
           <div className="analysis-inspector-wrapper reveal-stagger-2">
-            <UrlInspectorCard
-              initialUrl={activeUrl || ''}
-              onInspect={onStartInspection}
-              isInspecting={analysisState === 'scanning'}
-            />
+            <UrlInspectorCard initialUrl={activeUrl || ''} onInspect={onStartInspection} isInspecting={analysisState === 'scanning'} />
           </div>
 
-          {/* STATE 1: SCANNING PROGRESS STATE */}
           {analysisState === 'scanning' && activeUrl && (
             <div className="analysis-live-scanning-card reveal-stagger-2" aria-live="polite">
               <div className="scanning-card-header">
-                <div className="scanning-pulse-box reveal-stagger-3">
-                  <SearchPulseIcon />
-                </div>
-                <div className="scanning-header-titles reveal-stagger-2">
-                  <span className="scanning-status-pill">LIVE INSPECTION IN PROGRESS</span>
-                  <h3 className="scanning-target-url">
-                    <code>{activeUrl}</code>
-                  </h3>
+                <div className="scanning-pulse-box"><SearchPulseIcon /></div>
+                <div className="scanning-header-titles">
+                  <span className="scanning-status-pill">NON-EXECUTING ANALYSIS IN PROGRESS</span>
+                  <h3 className="scanning-target-url"><code>{activeUrl}</code></h3>
                 </div>
                 <div className="scanning-pct-badge">{scanProgress}%</div>
               </div>
-
-              <div className="progress-track-bar">
-                <div className="progress-fill-bar" style={{ width: `${scanProgress}%` }} />
-              </div>
-
-              <div className="sequence-steps-grid reveal-stagger-4">
+              <div className="progress-track-bar"><div className="progress-fill-bar" style={{ width: `${scanProgress}%` }} /></div>
+              <div className="sequence-steps-grid analysis-scan-grid">
                 {SCAN_STEPS.map((step, idx) => {
                   const isDone = idx < activeStepIndex
                   const isCurrent = idx === activeStepIndex
                   return (
                     <div key={step.id} className={`step-item ${isDone ? 'step-done' : ''} ${isCurrent ? 'step-active' : ''}`}>
-                      <div className="step-num-badge">
-                        {isDone ? '✓' : step.id}
-                      </div>
-                      <div className="step-text-wrap">
-                        <span className="step-name">{step.name}</span>
-                        <span className="step-desc">{step.desc}</span>
-                      </div>
+                      <div className="step-num-badge">{isDone ? '✓' : step.id}</div>
+                      <div className="step-text-wrap"><span className="step-name">{step.name}</span><span className="step-desc">{step.desc}</span></div>
                     </div>
                   )
                 })}
@@ -2597,447 +3309,91 @@ function AnalysisPage({
             </div>
           )}
 
-          {/* STATE 2: STANDBY (NO URL ENTERED / AWAITING SCAN) */}
           {analysisState === 'idle' && !analysisResult && (
             <div className="analysis-empty-compact-card reveal-stagger-2">
-              <div className="empty-compact-content">
-                <div className="empty-compact-badge-row">
-                  <span className="empty-status-dot" />
-                  <span className="empty-compact-pill">STANDBY MODE</span>
-                </div>
-                <h3 className="empty-compact-title">No URL inspected yet.</h3>
-                <p className="empty-compact-desc">
-                  Your URL intelligence report will appear here. Enter a URL in the Scanner to begin real-time analysis.
-                </p>
-              </div>
-              <div className="empty-compact-action">
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
-                  onClick={onResetScan}
-                >
-                  <span>Go to Scanner</span>
-                  <ArrowUpRight />
-                </button>
-              </div>
+              <div className="empty-compact-content"><div className="empty-compact-badge-row"><span className="empty-status-dot" /><span className="empty-compact-pill">STANDBY MODE</span></div><h3 className="empty-compact-title">No URL inspected yet.</h3><p className="empty-compact-desc">Enter a URL above to generate its complete intelligence dossier.</p></div>
+              <div className="empty-compact-action"><button type="button" className="btn btn-primary btn-sm" onClick={onResetScan}>Go to Scanner <ArrowUpRight /></button></div>
             </div>
           )}
 
-          {/* STATE 4: BACKEND / API FAILURE STATE */}
           {analysisState === 'error' && (
-            <div className="analysis-empty-compact-card reveal-stagger-2" style={{ borderColor: 'rgba(239, 68, 68, 0.4)', background: 'rgba(239, 68, 68, 0.03)' }} role="alert">
-              <div className="empty-compact-content" style={{ padding: '28px 24px' }}>
-                <div className="empty-compact-badge-row">
-                  <span className="empty-status-dot" style={{ backgroundColor: 'var(--threat-malicious)' }} />
-                  <span className="empty-compact-pill" style={{ color: 'var(--threat-malicious)', borderColor: 'rgba(239, 68, 68, 0.3)' }}>BACKEND SERVICE ERROR</span>
-                </div>
-                <h3 className="empty-compact-title" style={{ color: 'var(--text-primary)', marginTop: 8 }}>
-                  Threat Intelligence Backend Unavailable
-                </h3>
-                <p className="empty-compact-desc" style={{ color: 'var(--text-secondary)', marginTop: 6, maxWidth: '640px' }}>
-                  {analysisError || 'Real-time analysis could not be completed. Please ensure the backend server is running and try again.'}
-                </p>
-                <div style={{ marginTop: 18, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                  <button
-                    type="button"
-                    className="btn btn-primary btn-sm"
-                    onClick={() => activeUrl && onStartInspection(activeUrl)}
-                  >
-                    <span>Retry Analysis</span>
-                    <ArrowUpRight />
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-outline btn-sm"
-                    onClick={onResetScan}
-                  >
-                    <span>← Scan Another URL</span>
-                  </button>
-                </div>
-              </div>
+            <div className="analysis-error-card" role="alert">
+              <div className="error-card-icon">!</div>
+              <div><span className="analysis-eyebrow">BACKEND SERVICE ERROR</span><h3>Analysis could not be completed.</h3><p>{analysisError || 'The FastAPI analysis service did not return a usable result.'}</p><div className="error-card-actions"><button type="button" className="btn btn-primary btn-sm" onClick={() => activeUrl && onStartInspection(activeUrl)}>Retry Analysis <ArrowUpRight /></button><button type="button" className="btn btn-outline btn-sm" onClick={onResetScan}>Scan Another URL</button></div></div>
             </div>
           )}
 
-          {/* STATE 3: COMPLETED THREAT ANALYSIS REPORT */}
           {analysisState === 'completed' && analysisResult && (
-            <div className="active-analysis-report-wrapper">
-              {/* Action Toolbar */}
+            <div className="analysis-report-shell">
               <div className="analysis-report-toolbar">
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
-                  onClick={onResetScan}
-                >
-                  <span>← Scan Another URL</span>
-                </button>
-              </div>
-
-              {/* Primary Verdict Banner */}
-              <div className={`verdict-hero-card verdict-${analysisResult.verdict.toLowerCase()} reveal-stagger-1`}>
-                <div className="verdict-card-left">
-                  <div className="verdict-badge-row">
-                    <span className="verdict-tag">{analysisResult.verdict === 'UNREACHABLE' ? 'WEBSITE NOT FOUND' : `${analysisResult.verdict} VERDICT`}</span>
-                    {typeof analysisResult.threatScore === 'number' && (
-                      <span className="verdict-score-pill">Threat Index: {analysisResult.threatScore}/100</span>
-                    )}
-                    {analysisResult.confidence && (
-                      <span className="verdict-score-pill" style={{ opacity: 0.9 }}>
-                        Confidence: {String(analysisResult.confidence).toUpperCase()}
-                      </span>
-                    )}
-                  </div>
-                  <h3 className="scanned-url-heading" title={analysisResult.url}>
-                    <code>{analysisResult.maskedUrl}</code>
-                  </h3>
-                  <p className="verdict-summary-text">{analysisResult.summary}</p>
-                  {analysisResult.domainStatus && (
-                    <div className={`domain-status-banner dstate-${analysisResult.domainStatus.state}`} role="status">
-                      <span className="dsb-icon" aria-hidden="true">
-                        {analysisResult.domainStatus.state === 'live' || analysisResult.domainStatus.state === 'ip_host' ? '✓'
-                          : analysisResult.domainStatus.state === 'unknown' ? '?' : '✕'}
-                      </span>
-                      <div className="dsb-body">
-                        <strong>{analysisResult.domainStatus.title}</strong>
-                        <p>{analysisResult.domainStatus.detail}</p>
-                        {analysisResult.domainStatus.evidence.length > 0 && analysisResult.domainStatus.state !== 'live' && (
-                          <span className="dsb-evidence">{analysisResult.domainStatus.evidence.join('  ·  ')}</span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  <div className="url-telemetry-meta">
-                    <div className="telemetry-item">
-                      <span className="telemetry-label">Hostname:</span>
-                      <code className="telemetry-value">{analysisResult.hostname}</code>
-                    </div>
-                    <div className="telemetry-item">
-                      <span className="telemetry-label">Protocol:</span>
-                      <code className="telemetry-value">{analysisResult.protocol} ({analysisResult.structure.isHttps ? 'Encrypted' : 'Unencrypted'})</code>
-                    </div>
-                    <div className="telemetry-item">
-                      <span className="telemetry-label">Domain Age:</span>
-                      <span className="telemetry-value">{analysisResult.whois.domainAgeFormatted}</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="verdict-card-right">
-                  <ThreatScoreGauge score={analysisResult.threatScore} verdict={analysisResult.verdict} />
+                <div><span className="analysis-eyebrow">REPORT READY</span><span className="analysis-toolbar-url"><code>{analysisResult.url.hostname}</code></span></div>
+                <div className="analysis-toolbar-actions">
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => window.print()}>Print</button>
+                  <button type="button" className="btn btn-primary btn-sm" onClick={() => downloadAnalysisPdf(analysisResult)}>Download PDF ↓</button>
+                  <button type="button" className="btn btn-outline btn-sm" onClick={onResetScan}>New Scan</button>
                 </div>
               </div>
 
-              {/* 6 Analysis Deep-Dive Cards */}
-              <div className="cards-grid-6">
-                {/* Card 1: OSINT Snapshot */}
-                <article className="analysis-card stagger-card-1">
-                  <div className="card-top-bar">
-                    <span className="card-num">01</span>
-                    <span className="card-category">OSINT SNAPSHOT</span>
-                  </div>
-                  <h4 className="card-title">Open-Source Intelligence</h4>
-                  <div className="card-data-table">
-                    <div className="data-row">
-                      <span className="data-key">Hostname</span>
-                      <code className="data-val">{analysisResult.osint.hostname}</code>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Domain</span>
-                      <code className="data-val">{analysisResult.osint.domain}</code>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Protocol</span>
-                      <span className="data-val font-mono">{analysisResult.osint.scheme.toUpperCase()}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">DNS Status</span>
-                      <span className={`data-val font-semibold ${analysisResult.osint.dnsStatus === 'resolved' ? 'text-safe' : 'highlight-warning'}`}>
-                        {analysisResult.osint.dnsStatus.replace(/_/g, ' ')}
-                      </span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Resolved IPs</span>
-                      <span className="data-val text-xs font-mono">
-                        {analysisResult.osint.resolvedIps.length ? analysisResult.osint.resolvedIps.slice(0, 3).join(', ') : 'None returned'}
-                      </span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Domain State</span>
-                      <span className="data-val">{analysisResult.osint.domainState || 'Unknown'}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Query Parameters</span>
-                      <span className="data-val">{analysisResult.osint.queryParameterCount}</span>
-                    </div>
-                  </div>
-                  <p className="card-narrative">Compact OSINT evidence collected from the URL, DNS resolution, and domain-state checks. Detailed registration and IP intelligence are shown in the dedicated cards below.</p>
-                </article>
+              <AssessmentHero raw={analysisResult} />
 
-                {/* Card 2: Typosquatting */}
-                <article className="analysis-card stagger-card-2">
-                  <div className="card-top-bar">
-                    <span className="card-num">02</span>
-                    <span className="card-category">TYPOSQUATTING CHECK</span>
-                  </div>
-                  <h4 className="card-title">Lookalike Domain Detection</h4>
-                  <div className="card-data-table">
-                    <div className="data-row">
-                      <span className="data-key">Target Brand</span>
-                      <span className={`data-val font-semibold ${analysisResult.typosquatting.detected ? 'text-malicious' : analysisResult.typosquatting.isOfficialDomain ? 'text-safe' : ''}`}>
-                        {analysisResult.typosquatting.targetBrand
-                          || (analysisResult.typosquatting.isOfficialDomain ? `${analysisResult.typosquatting.officialBrand} (official domain)` : 'None Identified')}
-                      </span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Imitation Pattern</span>
-                      <span className="data-val">{analysisResult.typosquatting.patternType || 'Standard Syntax'}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Similarity Index</span>
-                      <span className="data-val font-mono">
-                        {analysisResult.typosquatting.detected
-                          ? `${analysisResult.typosquatting.similarityScore}% Match`
-                          : analysisResult.typosquatting.isOfficialDomain ? 'Exact official match' : '0% (no match)'}
-                      </span>
-                    </div>
-                    {analysisResult.typosquatting.detected && analysisResult.typosquatting.officialDomain && (
-                      <div className="data-row">
-                        <span className="data-key">Legitimate Domain</span>
-                        <code className="data-val">{analysisResult.typosquatting.officialDomain}</code>
-                      </div>
-                    )}
-                    {analysisResult.typosquatting.detected && analysisResult.typosquatting.confidence && (
-                      <div className="data-row">
-                        <span className="data-key">Confidence</span>
-                        <span className="data-val" style={{ textTransform: 'capitalize' }}>{analysisResult.typosquatting.confidence}</span>
-                      </div>
-                    )}
-                  </div>
-                  <p className="card-narrative">{analysisResult.typosquatting.explanation}</p>
-                  {analysisResult.typosquatting.detected && (
-                    <div className="badge-flag flag-critical">
-                      <span>Spoofed Brand Target: <strong>{analysisResult.typosquatting.targetBrand}</strong></span>
-                    </div>
-                  )}
-                </article>
-
-                {/* Card 3: Homoglyph Inspection */}
-                <article className="analysis-card stagger-card-3">
-                  <div className="card-top-bar">
-                    <span className="card-num">03</span>
-                    <span className="card-category">HOMOGLYPH AUDIT</span>
-                  </div>
-                  <h4 className="card-title">Unicode &amp; Character Spoofs</h4>
-                  <div className="card-data-table">
-                    <div className="data-row">
-                      <span className="data-key">Homoglyph Status</span>
-                      <span className={`data-val font-semibold ${analysisResult.homoglyphs.detected ? 'text-malicious' : 'text-safe'}`}>
-                        {analysisResult.homoglyphs.detected ? 'Deceptive Characters Found' : 'Clean (Pure ASCII)'}
-                      </span>
-                    </div>
-                    {analysisResult.homoglyphs.characters.map((c, i) => (
-                      <div key={i} className="data-row homoglyph-row">
-                        <span className="data-key">Character #{i + 1}</span>
-                        <span className="data-val">
-                          <code className="char-badge">{c.char}</code> ({c.codePoint}) mimics Latin <code className="char-badge">'{c.lookalike}'</code>
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                  <p className="card-narrative">{analysisResult.homoglyphs.explanation}</p>
-                </article>
-
-                {/* Card 4: URL Structure & Path */}
-                <article className="analysis-card stagger-card-4">
-                  <div className="card-top-bar">
-                    <span className="card-num">04</span>
-                    <span className="card-category">URL STRUCTURE</span>
-                  </div>
-                  <h4 className="card-title">Path &amp; Parameter Semantics</h4>
-                  <div className="card-data-table">
-                    <div className="data-row">
-                      <span className="data-key">Path</span>
-                      <code className="data-val text-xs break-all">{analysisResult.path || '/'}</code>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Suspicious Keywords</span>
-                      <span className="data-val">
-                        {analysisResult.structure.suspiciousKeywords.length > 0 ? (
-                          analysisResult.structure.suspiciousKeywords.map(k => <code key={k} className="keyword-chip">{k}</code>)
-                        ) : (
-                          <span className="text-safe">✓ None found</span>
-                        )}
-                      </span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Encoded Bytes</span>
-                      <span className="data-val text-xs font-mono break-all">
-                        {analysisResult.structure.hasEncodedChars
-                          ? (analysisResult.structure.encodedSegments && analysisResult.structure.encodedSegments.length > 0
-                              ? analysisResult.structure.encodedSegments.slice(0, 3).map(e => `${e.raw} → ${JSON.stringify(e.decoded)}`).join('  ')
-                              : 'Detected (%xx encoding)')
-                          : <span className="text-safe">✓ None detected</span>}
-                        {analysisResult.structure.doubleEncoded ? '  (double-encoded)' : ''}
-                      </span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Query Parameters</span>
-                      <span className="data-val">{analysisResult.queryParams.length > 0 ? `${analysisResult.queryParams.length} parameter(s)` : <span className="text-safe">✓ None detected</span>}</span>
-                    </div>
-                    {analysisResult.queryParams.slice(0, 4).map(q => (
-                      <div key={q.key} className="data-row">
-                        <span className="data-key font-mono text-xs">{q.key}{q.isSensitive ? ' ⚠' : ''}</span>
-                        <code className="data-val text-xs break-all">{q.isSensitive ? q.maskedValue : (q.decoded ? `${q.value.slice(0, 24)}… → ${q.decoded.slice(0, 48)}` : q.value.slice(0, 64))}</code>
-                      </div>
-                    ))}
-                    {analysisResult.structure.hasUserInfo && (
-                      <div className="data-row">
-                        <span className="data-key">Embedded Login (@)</span>
-                        <span className="data-val text-malicious font-semibold">Detected — host spoofing trick</span>
-                      </div>
-                    )}
-                    {analysisResult.structure.redirectTargets && analysisResult.structure.redirectTargets.length > 0 && (
-                      <div className="data-row">
-                        <span className="data-key">Redirect Target</span>
-                        <code className={`data-val text-xs break-all ${analysisResult.structure.redirectTargets[0].crossDomain ? 'text-malicious' : ''}`}>{analysisResult.structure.redirectTargets[0].host}</code>
-                      </div>
-                    )}
-                    {typeof analysisResult.structure.subdomainDepth === 'number' && analysisResult.structure.subdomainDepth >= 3 && (
-                      <div className="data-row">
-                        <span className="data-key">Subdomain Depth</span>
-                        <span className="data-val text-malicious">{analysisResult.structure.subdomainDepth} levels (unusually deep)</span>
-                      </div>
-                    )}
-                    {(analysisResult.structure.hasOpaquePath || analysisResult.structure.hasRedirectParameter || analysisResult.structure.isTrackingOrRedirectService || analysisResult.structure.isUrlShortener) && (
-                      <div className="data-row">
-                        <span className="data-key">Redirect / Tracking</span>
-                        <span className="data-val">
-                          {analysisResult.structure.isTrackingOrRedirectService ? 'Tracking service' : analysisResult.structure.isUrlShortener ? 'URL shortener' : analysisResult.structure.hasRedirectParameter ? 'Redirect parameter' : 'Opaque path token'}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                  <p className="card-narrative">{analysisResult.structure.explanation}</p>
-                </article>
-
-                {/* Card 5: WHOIS / RDAP */}
-                <article className="analysis-card stagger-card-5">
-                  <div className="card-top-bar">
-                    <span className="card-num">05</span>
-                    <span className="card-category">WHOIS / RDAP</span>
-                  </div>
-                  <h4 className="card-title">Registration Intelligence</h4>
-                  <div className="card-data-table">
-                    <div className="data-row">
-                      <span className="data-key">Domain</span>
-                      <code className="data-val">{analysisResult.whois.domain}</code>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Registrar</span>
-                      <span className={`data-val ${isMissing(analysisResult.whois.registrar) ? 'data-val-muted' : ''}`}>{analysisResult.whois.registrar}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Registered</span>
-                      <span className="data-val font-mono">{analysisResult.whois.creationDate}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Domain Age</span>
-                      <span className={`data-val font-semibold ${analysisResult.whois.isNewlyRegistered ? 'highlight-warning' : ''}`}>{analysisResult.whois.domainAgeFormatted}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Registry Status</span>
-                      <span className="data-val text-xs font-mono">{analysisResult.whois.status}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Expires</span>
-                      <span className="data-val font-mono">{analysisResult.whois.expirationDate || 'Not published'}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Nameservers</span>
-                      <span className="data-val text-xs font-mono">{analysisResult.whois.nameservers?.length ? analysisResult.whois.nameservers.slice(0, 2).join(', ') : 'Not published'}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Data Source</span>
-                      <span className="data-val text-xs font-mono">{analysisResult.whois.source || 'RDAP'}</span>
-                    </div>
-                  </div>
-                  {analysisResult.whois.lookupNote && <p className="card-narrative">{analysisResult.whois.lookupNote}</p>}
-                </article>
-
-                {/* Card 6: IP Intelligence */}
-                <article className="analysis-card stagger-card-6">
-                  <div className="card-top-bar">
-                    <span className="card-num">06</span>
-                    <span className="card-category">IP INTELLIGENCE</span>
-                  </div>
-                  <h4 className="card-title">Network &amp; Geolocation</h4>
-                  <div className="card-data-table">
-                    <div className="data-row">
-                      <span className="data-key">Lookup Status</span>
-                      <span className={`data-val font-semibold ${analysisResult.intelligence?.ipIntelligence?.ip ? 'text-safe' : 'data-val-muted'}`}>{analysisResult.intelligence?.ipIntelligence?.ip ? 'Enriched' : 'No public IP data'}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">IP Address</span>
-                      <code className="data-val">{analysisResult.intelligence?.ipIntelligence?.ip || 'Not available'}</code>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Location</span>
-                      <span className="data-val">{[analysisResult.intelligence?.ipIntelligence?.geolocation?.city, analysisResult.intelligence?.ipIntelligence?.geolocation?.region, analysisResult.intelligence?.ipIntelligence?.geolocation?.country].filter(Boolean).join(', ') || 'Not available'}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">ASN</span>
-                      <span className="data-val font-mono">{analysisResult.intelligence?.ipIntelligence?.geolocation?.asn || 'Not available'}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Organization</span>
-                      <span className="data-val">{analysisResult.intelligence?.ipIntelligence?.geolocation?.org || 'Not available'}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Coordinates</span>
-                      <span className="data-val font-mono">{analysisResult.intelligence?.ipIntelligence?.geolocation?.latitude != null && analysisResult.intelligence?.ipIntelligence?.geolocation?.longitude != null ? `${analysisResult.intelligence.ipIntelligence.geolocation.latitude}, ${analysisResult.intelligence.ipIntelligence.geolocation.longitude}` : 'Not available'}</span>
-                    </div>
-                    <div className="data-row">
-                      <span className="data-key">Public IPs</span>
-                      <span className="data-val">{analysisResult.osint.resolvedIps.length}</span>
-                    </div>
-                  </div>
-                  <p className="card-narrative">Network-level intelligence returned by the backend. Geolocation is approximate and should not be treated as a physical address.</p>
-                </article>
-
-                {/* Card 7: Threat Reasoning */}
-                <article className="analysis-card stagger-card-7">
-                  <div className="card-top-bar">
-                    <span className="card-num">07</span>
-                    <span className="card-category">THREAT REASONING</span>
-                  </div>
-                  <h4 className="card-title">Score Contributing Factors</h4>
-                  <div className="findings-bullet-list">
-                    {analysisResult.reasons.map((item, idx) => (
-                      <div key={idx} className={`finding-bullet-item severity-${item.severity}`}>
-                        <span className="finding-bullet-index">{String(idx + 1).padStart(2, '0')}</span>
-                        <div className="finding-bullet-content">
-                          <strong className="finding-bullet-title">{item.title || (item as any).name}</strong>
-                          <p className="finding-bullet-desc">{item.detail}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </article>
+              <div className="analysis-five-card-grid">
+                <AnalysisDataCard
+                  number="01"
+                  eyebrow="URL FORENSICS"
+                  title="URL — All Parts"
+                  kind="url"
+                  raw={analysisResult}
+                  payload={{ url: analysisResult.url, security: analysisResult.security }}
+                />
+                <AnalysisDataCard
+                  number="02"
+                  eyebrow="DNS INTELLIGENCE"
+                  title="DNS Information"
+                  kind="dns"
+                  raw={analysisResult}
+                  payload={{ dns: analysisResult.dns, dns_security: analysisResult.dns_security }}
+                />
+                <AnalysisDataCard
+                  number="03"
+                  eyebrow="NETWORK & GEOLOCATION"
+                  title="IP Information & Geolocation"
+                  kind="ip"
+                  raw={analysisResult}
+                  payload={{ ip_intelligence: analysisResult.ip_intelligence, ip_security: analysisResult.ip_security }}
+                />
+                <AnalysisDataCard
+                  number="04"
+                  eyebrow="DOMAIN REGISTRY"
+                  title="WHOIS / RDAP Information"
+                  kind="whois"
+                  raw={analysisResult}
+                  payload={{ whois: analysisResult.whois, whois_security: analysisResult.whois_security }}
+                />
+                <AnalysisDataCard
+                  number="05"
+                  eyebrow="OPEN-SOURCE INTELLIGENCE"
+                  title="OSINT — In Depth"
+                  kind="osint"
+                  raw={analysisResult}
+                  payload={{ osint: analysisResult.osint, osint_security: analysisResult.osint_security }}
+                />
               </div>
+
+              <div className="analysis-evidence-footer-panel">
+                <div>
+                  <span className="analysis-eyebrow">COMPLETE BACKEND EVIDENCE</span>
+                  <h3>Nothing is hard-coded into this report.</h3>
+                  <p>The five panels above are populated from the live JSON returned by FastAPI. Security findings, provider states, RDAP events, DNS records, IP enrichment, OSINT matches, correlation evidence and coverage remain tied to the current scan.</p>
+                </div>
+                <details>
+                  <summary>Inspect final assessment &amp; coverage payload</summary>
+                  <JsonTree value={normalizeDisplayData({ final_assessment: analysisResult.final_assessment })} />
+                </details>
+              </div>
+
+              <div className="analysis-bottom-cta"><div><span className="analysis-eyebrow">NEXT INSPECTION</span><h3>Have another suspicious link?</h3><p>Run a fresh non-executing analysis with the same evidence pipeline.</p></div><button type="button" className="btn btn-primary" onClick={onResetScan}>Scan another URL <ArrowUpRight /></button></div>
             </div>
           )}
-
-          {/* Persistent Cybersecurity Educational Carousel */}
-          <div className="analysis-carousel-section-wrap">
-            <div className="carousel-section-header">
-              <span className="editorial-eyebrow">CYBERSECURITY CAROUSEL</span>
-              <h3 className="carousel-main-heading">Know what you're looking for.</h3>
-              <p className="carousel-main-desc">
-                Understand the visual and technical indicators used to detect lookalike domains, obfuscated paths, and deceptive URLs.
-              </p>
-            </div>
-
-            <CybersecurityCarousel />
-          </div>
         </div>
       </section>
     </div>
@@ -3839,7 +4195,7 @@ export default function App() {
   const [transitionDirection, setTransitionDirection] = useState<TransitionDirection>('forward')
   const [activeUrl, setActiveUrl] = useState<string | null>(null)
   const [analysisState, setAnalysisState] = useState<ScanState>('idle')
-  const [analysisResult, setAnalysisResult] = useState<AnalysisDetails | null>(null)
+  const [analysisResult, setAnalysisResult] = useState<BackendAnalysisResponse | null>(null)
   const [analysisError, setAnalysisError] = useState<string | null>(null)
 
   // Set and lock document title to PhishGuard
@@ -3952,8 +4308,7 @@ export default function App() {
       }
 
       const raw = (await response.json()) as BackendAnalysisResponse
-      const result = mapBackendAnalysisToDetails(raw)
-      setAnalysisResult(result)
+      setAnalysisResult(raw)
       setAnalysisError(null)
       setAnalysisState('completed')
     } catch (error: unknown) {

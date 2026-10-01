@@ -767,6 +767,26 @@ class FinalAssessmentResult(BaseModel):
 
     confidence: SecurityConfidence
 
+    # Deterministic evidence-derived index used only for visualization.
+    # This is not a probability and does not claim universal safety/maliciousness.
+    risk_score: int = Field(ge=0, le=100)
+
+    risk_score_version: str = "evidence-v1"
+
+    risk_factors: dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+    # Per-dimension points returned by the backend for the live visual graph.
+    risk_dimensions: dict[str, int] = Field(
+        default_factory=dict
+    )
+
+    # Top evidence contributors used to explain the current index.
+    risk_events: list[dict[str, Any]] = Field(
+        default_factory=list
+    )
+
     summary: str
 
     rationale: list[str] = Field(

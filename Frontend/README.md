@@ -49,3 +49,8 @@ with `http://127.0.0.1:8000` as the default base URL.
 - Preserved the existing visual design and navigation.
 
 The current backend does not return a numeric 0–100 threat score, entropy, typosquatting, or homoglyph result in `AnalysisResponse`, so this frontend no longer invents a threat score. Those parts will be handled against the actual backend contract in the later analysis-page stages.
+
+
+## Dynamic five-panel analysis report
+
+The `/analysis` route renders the live FastAPI analysis response. The five information cards (URL, DNS, IP/geolocation, WHOIS/RDAP, OSINT) are generated from response JSON, with expandable complete payloads and backend-derived risk visualization. No report threat score is hard-coded.
