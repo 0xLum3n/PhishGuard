@@ -1,0 +1,11 @@
+{
+  "title": "PhishGuard",
+  "description": "Analyze suspicious URLs to detect phishing, typosquatting, and domain threats, empowering users to make informed online safety decisions.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

@@ -1,0 +1,63 @@
+================================================================================
+PHISHGUARD — SYSTEM REQUIREMENTS & LOCAL SETUP GUIDE
+================================================================================
+
+[ 1. SYSTEM PREREQUISITES ]
+--------------------------------------------------------------------------------
+To run PhishGuard on another computer, you must have Node.js installed:
+
+• Node.js: v18.x, v20.x, or v22.x (LTS recommended)
+  Download from: https://nodejs.org/
+• npm (Node Package Manager): Comes automatically bundled with Node.js.
+
+To verify installation on the new computer, open a Terminal / Command Prompt:
+  node -v
+  npm -v
+
+
+[ 2. REQUIRED LIBRARIES & PACKAGES (NPM DEPENDENCIES) ]
+--------------------------------------------------------------------------------
+These dependencies are managed via package.json:
+
+Core Application Libraries:
+• react (^19.0.0)             - UI Component Framework
+• react-dom (^19.0.0)         - DOM Rendering Engine
+
+Build & Tooling Dependencies:
+• vite (^8.0.5)               - High-Performance Local Dev Server & Bundler
+• @vitejs/plugin-react        - React Fast-Refresh support for Vite
+• tailwindcss (^4.0.0)        - Modern Utility-First CSS Framework
+• @tailwindcss/vite (^4.0.0)  - Official Tailwind Vite integration
+• typescript (^5.7.0)         - Type-safe JavaScript compiler
+• @types/react (^19.0.0)      - TypeScript definitions for React
+• @types/react-dom (^19.0.0)  - TypeScript definitions for React DOM
+• @types/node (^22.0.0)       - Node.js type definitions
+
+
+[ 3. HOW TO INSTALL & RUN ON ANOTHER COMPUTER ]
+--------------------------------------------------------------------------------
+
+Step 1: Copy the project folder to the new computer.
+(Make sure to copy all project files: src/, index.html, package.json, vite.config.ts, etc.)
+Note: You do NOT need to copy the heavy "node_modules" folder.
+
+Step 2: Open Terminal / PowerShell / Command Prompt inside the project folder:
+  cd path/to/PhishGuard-Redesigned-Fresh
+
+Step 3: Install all required libraries in one command:
+  npm install
+
+Step 4: Start the local development server:
+  npm run dev
+
+Step 5: Open your browser and navigate to the localhost URL shown in the terminal:
+  http://localhost:8443   (or http://localhost:5173)
+
+
+[ 4. USEFUL COMMANDS REFERENCE ]
+--------------------------------------------------------------------------------
+• npm install       -> Downloads and installs all required libraries
+• npm run dev       -> Starts the interactive local development server
+• npm run build     -> Compiles the production-ready optimized build into /dist
+• npm run preview   -> Previews the compiled production build locally
+================================================================================
