@@ -21,10 +21,16 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+    # Local development uses Vite (this project defaults to port 8443),
+    # but Vite may move to another port if needed. Keep the explicit common
+    # ports and allow loopback HTTP origins through the regex.
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:8443",
+        "http://127.0.0.1:8443",
     ],
+    allow_origin_regex=r"^https?://(?:localhost|127\.0\.0\.1)(?::\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,47 +1,51 @@
-# PhishGuard
+# PhishGuard Frontend — API Integration Fixed
 
-PhishGuard is a React/Vite URL-analysis interface backed by a FastAPI enrichment service.
+This frontend is wired to the current PhishGuard FastAPI backend.
 
-## What `/analysis` now does
+## Backend contract
 
-The analysis workflow no longer fabricates WHOIS/domain-age/IP/OSINT values in the browser. The page:
+The URL analysis request is sent to:
 
-- parses the URL into scheme, subdomain, domain, TLD, port, path, query string, query parameters/values, and fragment;
-- sends the normalized URL to the FastAPI backend for live DNS/IP/RDAP/OSINT enrichment;
-- displays resolved IP addresses and geolocation/ASN data when the provider returns it;
-- displays RDAP registration data rather than hard-coded registrar or creation dates;
-- performs passive OSINT pivots such as DNS/subdomain, reverse-IP, and public urlscan sightings;
-- supports optional PhishTank, URLhaus, VirusTotal, and AbuseIPDB enrichment through backend-only API keys;
-- clearly marks unavailable/rate-limited sources instead of replacing them with static values;
-- never loads the submitted URL as a webpage.
+`POST /api/analysis` (proxied by Vite to `http://127.0.0.1:8000` in local development)
 
-## Run the project
+Request body:
 
-### Frontend
+```json
+{
+  "url": "https://example.com"
+}
+```
 
-```powershell
+## Run
+
+1. Make sure the FastAPI backend is running on port `8000`.
+2. Install frontend dependencies:
+
+```bash
 npm install
-copy .env.example .env
+```
+
+3. (Optional) create `.env` from `.env.example`. Leave `VITE_API_BASE_URL` empty for local Vite development; set it to the backend origin only when the frontend is hosted separately.
+4. Start Vite:
+
+```bash
 npm run dev
 ```
 
-For the local Vite preview, leave `VITE_API_BASE_URL` empty. Vite proxies same-origin `/api/*` requests to FastAPI, which also avoids HTTPS→HTTP mixed-content blocks. When the backend is deployed separately, set `VITE_API_BASE_URL` to its HTTPS origin.
+The frontend will use:
 
-### Backend
+`$VITE_API_BASE_URL/api/analysis`
 
-```powershell
-cd backend
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-copy .env.example .env
-python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
-```
+with `http://127.0.0.1:8000` as the default base URL.
 
-Then start the frontend normally. Keep the FastAPI service running on port 8000 so Vite can proxy `/api/analyze` to it.
+## What was fixed in this stage
 
-## Free/public data sources used by the baseline
+- Corrected the analysis endpoint from `/analysis` to `/api/analysis`.
+- Updated the frontend response adapter to the backend's real `AnalysisResponse` shape.
+- Wired the final assessment, DNS, IP intelligence, RDAP/WHOIS, OSINT, and security findings into the existing analysis view.
+- Removed the dependency on the old `raw.analysis.*` response contract.
+- Added environment-based backend URL configuration.
+- Kept URL credentials and known sensitive query parameters masked in the displayed URL.
+- Preserved the existing visual design and navigation.
 
-RDAP.org is used for registration data. ipapi.co is used for IP geolocation. HackerTarget is used for DNS and passive infrastructure pivots. urlscan.io search is used for existing public scan sightings. Optional threat-intelligence providers can be enabled from `backend/.env`.
-
-Provider quotas, terms, attribution requirements, and key requirements are external to PhishGuard and can change; review the provider documentation before a public/commercial deployment.
+The current backend does not return a numeric 0–100 threat score, entropy, typosquatting, or homoglyph result in `AnalysisResponse`, so this frontend no longer invents a threat score. Those parts will be handled against the actual backend contract in the later analysis-page stages.

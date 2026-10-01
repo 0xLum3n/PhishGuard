@@ -34,19 +34,16 @@ react(),
       host: process.env.FIGMA_DEV_SERVER_HOST || '0.0.0.0',
       port: parseInt(process.env.PORT || '8443'),
       strictPort: true,
-      // Keep FastAPI on HTTP locally while exposing a same-origin /api route
-      // to the HTTPS preview. This avoids browser mixed-content/CORS problems.
       proxy: {
         '/api': {
-          target: process.env.BACKEND_PROXY_TARGET || 'http://127.0.0.1:8000',
+          target: process.env.PHISHGUARD_API_URL || 'http://127.0.0.1:8000',
           changeOrigin: true,
-          secure: false,
         },
       },
       watch: {
         ignored: [
           '**/.figma/**',
-],
+        ],
       },
     },
     preview: {

@@ -1,140 +1,63 @@
-import React, { FormEvent, useEffect, useState } from 'react'
+import React, { FormEvent, useEffect, useMemo, useState } from 'react'
 
-export type Verdict = 'SAFE' | 'SUSPICIOUS' | 'MALICIOUS'
+// Shows muted styling for values the registry/providers did not return
+const isMissing = (v?: string | null) => !v || /^(Unavailable|Not published|Not registered)/i.test(v)
+
+// Types
+export type Verdict = 'SAFE' | 'SUSPICIOUS' | 'MALICIOUS' | 'UNREACHABLE' | 'INCONCLUSIVE'
 export type ScanState = 'idle' | 'scanning' | 'completed' | 'error'
-export type PageRoute = 'scanner' | 'analysis' | 'how-it-works' | 'capabilities' | 'education' | 'about' | 'support'
+export type PageRoute = 'scanner' | 'analysis' | 'blog' | 'education' | 'about' | 'support'
 
-export interface UrlQueryParam {
-  key: string
-  value: string
-  isSensitive: boolean
-}
-
-export interface UrlParts {
-  scheme: string
-  subdomain: string
-  domain: string
-  tld: string
-  port: string
-  path: string
-  queryString: string
-  querySeparator: string
-  fragment: string
-  queryParams: UrlQueryParam[]
-}
-
-export interface IpResolution {
+export interface DomainStatus {
+  state: 'live' | 'nonexistent' | 'subdomain_missing' | 'registered_no_dns' | 'unknown' | 'ip_host'
+  exists: boolean
+  title: string
+  detail: string
+  confidence: 'high' | 'medium' | 'low'
+  evidence: string[]
   ips: string[]
-  primaryIp: string | null
-  lookupError?: string
 }
 
-export interface IpIntel {
-  ip: string | null
-  city?: string
-  region?: string
-  country?: string
-  countryCode?: string
-  latitude?: number
-  longitude?: number
-  timezone?: string
-  asn?: string
-  org?: string
-  rdapAvailable?: boolean
-  source?: string
-  error?: string
-}
 
-export interface DnsIntel {
-  A: string[]
-  AAAA: string[]
-  CNAME: string[]
-  MX: string[]
-  NS: string[]
-  TXT: string[]
-  SOA: string[]
-  source?: string
-  error?: string
-}
-
-export interface OsintIntel {
-  subdomains: string[]
-  reverseIpDomains: string[]
-  urlscanSightings: Array<{
-    uuid?: string
-    pageUrl?: string
-    taskTime?: string
-    country?: string
-    ip?: string
-  }>
-  phishtank?: {
-    inDatabase: boolean | null
-    verified: boolean | null
-    phishId?: string
-    submissionUrl?: string
-    source?: string
-    error?: string
-  }
-  urlhaus?: {
-    listed: boolean | null
-    threat?: string
-    urlStatus?: string
-    lastSeen?: string
-    source?: string
-    error?: string
-  }
-  virustotal?: {
-    malicious: number | null
-    suspicious: number | null
-    harmless: number | null
-    undetected: number | null
-    source?: string
-    error?: string
-  }
-  abuseIpdb?: {
-    confidenceScore: number | null
-    totalReports: number | null
-    lastReportedAt?: string | null
-    source?: string
-    error?: string
-  }
-  sources: string[]
-  notes: string[]
-}
-
-export interface WhoisIntel {
+export interface OSINTDetails {
+  url: string
+  hostname: string
   domain: string
-  registrar: string
-  creationDate: string
-  expirationDate?: string
-  updatedDate?: string
-  domainAgeDays: number | null
-  domainAgeFormatted: string
-  status: string[]
-  nameservers: string[]
-  isNewlyRegistered: boolean
-  dnssec?: string
-  source: string
-  cautionNote?: string
-  error?: string
+  subdomain?: string
+  tld?: string
+  scheme: string
+  dnsStatus: string
+  resolvedIps: string[]
+  ipv6: string[]
+  cname: string[]
+  domainState?: string
+  domainExists?: boolean
+  domainConfidence?: string
+  queryParameterCount: number
 }
 
 export interface AnalysisDetails {
   url: string
+  maskedUrl: string
+  osint: OSINTDetails
   normalizedUrl: string
   protocol: string
   hostname: string
   domain: string
   tld: string
   path: string
-  fragment: string
-  port: string
-  urlParts: UrlParts
-  queryParams: UrlQueryParam[]
+  queryParams: Array<{ key: string; value: string; maskedValue: string; isSensitive: boolean; decoded?: string | null }>
+  score?: number
+  threatScore?: number
+  confidence?: number | string
+  summary: string
+  verdict: Verdict | 'UNREACHABLE'
+  providers?: Record<string, any>
+  providerRows?: Array<{ name: string; state: string; detail: string }>
   entropy: {
     domainEntropy: number
     urlEntropy: number
-    level: 'Low' | 'Moderate' | 'High' | 'Suspiciously High'
+    level: string
     explanation: string
   }
   typosquatting: {
@@ -142,6 +65,10 @@ export interface AnalysisDetails {
     targetBrand?: string
     similarityScore?: number
     patternType?: string
+    isOfficialDomain?: boolean
+    officialBrand?: string
+    officialDomain?: string
+    confidence?: string
     explanation: string
   }
   homoglyphs: {
@@ -156,144 +83,543 @@ export interface AnalysisDetails {
     hasObfuscatedQuery: boolean
     hasIpHostname: boolean
     isHttps: boolean
+    hasOpaquePath?: boolean
+    hasRedirectParameter?: boolean
+    isTrackingOrRedirectService?: boolean
+    isUrlShortener?: boolean
+    encodedSegments?: Array<{ raw: string; decoded: string }>
+    doubleEncoded?: boolean
+    hasUserInfo?: boolean
+    subdomainDepth?: number
+    redirectTargets?: Array<{ param: string; target: string; host: string; crossDomain: boolean }>
     explanation: string
   }
-  resolution: IpResolution
-  ipIntel: IpIntel
-  dns: DnsIntel
-  osint: OsintIntel
-  whois: WhoisIntel
-  threatScore: number
-  verdict: Verdict
+  whois: {
+    domain: string
+    registrar: string
+    creationDate: string
+    domainAgeDays: number
+    domainAgeFormatted: string
+    status: string
+    isNewlyRegistered: boolean
+    dnssec: string
+    cautionNote?: string
+    expirationDate?: string | null
+    updatedDate?: string | null
+    nameservers?: string[]
+    source?: string
+    lookupStatus?: 'ok' | 'partial' | 'failed'
+    lookupNote?: string | null
+    registered?: boolean | null
+  }
+  intelligence?: {
+    dns: { ips: string[]; ipv6: string[]; cname: string[]; status?: string; checks?: Array<{ resolver: string; result: string }> }
+    reputation: {
+      virustotal?: { found: boolean; malicious: number; suspicious: number; harmless: number; undetected: number; error?: string }
+      urlhaus?: { found: boolean; status?: string; threat?: string; tags?: string[]; error?: string }
+      otx?: { found: boolean; pulses: number; reputation?: number; error?: string }
+      threatfox?: { found: boolean; matches: number; error?: string }
+      urlscan?: { found: boolean; total: number; error?: string }
+    }
+    ipIntelligence: {
+      ip?: string
+      geolocation?: { country?: string; region?: string; city?: string; latitude?: number; longitude?: number; asn?: string; org?: string; isp?: string }
+      shodan?: { ports: number[]; vulns: string[]; tags: string[]; error?: string }
+      abuseipdb?: { abuseConfidenceScore: number; totalReports: number; countryCode?: string; isp?: string; error?: string }
+      greynoise?: { classification?: string; noise?: boolean; riot?: boolean; name?: string; error?: string }
+    }
+    signals: Array<{ name: string; score: number; detail: string; severity: 'high' | 'medium' | 'low' | 'info' }>
+    providers?: Array<{ name: string; state: string; detail: string }>
+    providerTotal?: number
+  }
+  domainStatus?: DomainStatus
   reasons: Array<{ title: string; detail: string; severity: 'high' | 'medium' | 'low' | 'info' }>
-  generatedAt: string
-  backendSource: string
 }
 
-const CONFIGURED_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/$/, '')
+// Backend-only analysis pipeline.
+// The frontend does not calculate threat scores, entropy, typosquatting,
+// registration facts, DNS facts, or IP intelligence. It sends the URL to
+// the local FastAPI server and renders only the returned payload.
+const configuredApiBase = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '')
+// In local Vite development, use the same-origin /api proxy configured in vite.config.ts.
+// This avoids browser CORS preflight failures when the frontend port differs from the backend.
+const BACKEND_ANALYSIS_URL = configuredApiBase ? `${configuredApiBase}/api/analysis` : '/api/analysis'
 
-// When the frontend is served over HTTPS (including the PhishGuard preview on
-// localhost:8443), a direct HTTP call to 127.0.0.1:8000 is blocked by the
-// browser as mixed content. In development Vite proxies /api to FastAPI, so
-// prefer the same-origin endpoint in that situation. An explicit HTTPS backend
-// URL is still respected for production deployments.
-function getAnalysisEndpoint(): string {
-  if (typeof window === 'undefined') return `${CONFIGURED_API_BASE_URL}/api/analyze`
-  const pageIsHttps = window.location.protocol === 'https:'
-  const configuredIsHttp = /^http:\/\//i.test(CONFIGURED_API_BASE_URL)
-
-  if (!CONFIGURED_API_BASE_URL || (pageIsHttps && configuredIsHttp)) {
-    return '/api/analyze'
+// Cleans common paste/typing variations so the backend gets a parseable URL:
+// "example.com", "//example.com", "http:/x.com", "<https://x.com>", "hxxps://evil[.]com", trailing dots/spaces.
+export function normalizeUserUrl(input: string): string {
+  let u = (input || '').trim()
+  for (let i = 0; i < 3; i++) {
+    if (u.length >= 2 && ['<>', '""', "''", '()', '[]'].includes(u[0] + u[u.length - 1])) u = u.slice(1, -1).trim()
   }
-
-  return `${CONFIGURED_API_BASE_URL}/api/analyze`
+  u = u.replace(/[\u200b-\u200d\ufeff]/g, '').replace(/[.,;]+$/, '')
+  u = u.replace(/^hxxp/i, 'http').replace(/\[\.\]|\(\.\)/g, '.').replace(/\[:\]/g, ':')
+  u = u.replace(/^(https?):\/?(?!\/)(?=[^/])/i, '$1://').replace(/^(https?)\/\//i, '$1://')
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) return u
+  if (u.startsWith('//')) return 'https:' + u
+  return 'https://' + u.replace(/^\/+/, '')
 }
 
-function calculateShannonEntropy(str: string): number {
-  if (!str) return 0
-  const freq: Record<string, number> = {}
-  for (const char of str) freq[char] = (freq[char] || 0) + 1
-  let entropy = 0
-  for (const count of Object.values(freq)) {
-    const p = count / str.length
-    entropy -= p * Math.log2(p)
+const ANALYSIS_TIMEOUT_MS = 90000
+
+interface BackendEntropy {
+  domain_entropy: number
+  url_entropy: number
+  level: 'Low' | 'Moderate' | 'High' | 'Suspiciously High'
+  explanation: string
+}
+
+interface BackendTyposquatting {
+  detected: boolean
+  target_brand?: string | null
+  similarity_score?: number | null
+  pattern_type?: string | null
+  is_official_domain?: boolean | null
+  official_brand?: string | null
+  official_domain?: string | null
+  confidence?: string | null
+  explanation: string
+}
+
+interface BackendHomoglyph {
+  detected: boolean
+  characters: Array<{ char: string; code_point: string; lookalike: string; script: string }>
+  explanation: string
+}
+
+interface BackendStructure {
+  has_suspicious_path: boolean
+  suspicious_keywords: string[]
+  has_encoded_chars: boolean
+  has_obfuscated_query: boolean
+  has_ip_hostname: boolean
+  is_https: boolean
+  has_opaque_path?: boolean
+  has_redirect_parameter?: boolean
+  is_tracking_or_redirect_service?: boolean
+  is_url_shortener?: boolean
+  encoded_segments?: Array<{ raw: string; decoded: string }>
+  double_encoded?: boolean
+  has_user_info?: boolean
+  subdomain_depth?: number
+  redirect_targets?: Array<{ param: string; target: string; host: string; cross_domain: boolean }>
+  explanation: string
+}
+
+interface BackendSecurityFinding {
+  rule_id: string
+  category: string
+  title: string
+  severity: 'info' | 'low' | 'medium' | 'high'
+  confidence: 'low' | 'medium' | 'high'
+  description: string
+  evidence?: Record<string, unknown>
+}
+
+interface BackendSecurityResult {
+  status: 'completed'
+  total_findings: number
+  findings: BackendSecurityFinding[]
+  observations: string[]
+}
+
+interface BackendOSINTProvider {
+  source: string
+  status: string
+  query: string
+  matched: boolean
+  match_count: number
+  matches: Array<{
+    source: string
+    match_type: string
+    indicator: string
+    reference?: string | null
+    details?: Record<string, unknown>
+  }>
+  metadata?: Record<string, unknown>
+  error?: string | null
+}
+
+interface BackendAnalysisResponse {
+  success: boolean
+  url: {
+    original: string
+    normalized: string
+    scheme: string
+    username?: string | null
+    password?: string | null
+    hostname: string
+    port?: number | null
+    subdomain?: string | null
+    domain?: string | null
+    registrable_domain?: string | null
+    tld?: string | null
+    path: string
+    query?: string | null
+    query_parameters: Array<{ name: string; value: string; values: string[] }>
+    fragment?: string | null
+    has_credentials: boolean
+    has_query: boolean
+    has_fragment: boolean
+    is_ip_address: boolean
   }
-  return Number(entropy.toFixed(3))
-}
-
-export interface LocalUrlPreview {
-  normalizedUrl: string
-  urlParts: UrlParts
-  protocol: string
-  hostname: string
-  domain: string
-  tld: string
-  path: string
-  fragment: string
-  port: string
-  queryParams: UrlQueryParam[]
-  entropy: number
-}
-
-const COMMON_MULTI_LABEL_SUFFIXES = new Set([
-  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.au', 'net.au', 'org.au', 'co.in', 'firm.in', 'net.in', 'org.in', 'gen.in', 'ind.in',
-  'com.br', 'com.cn', 'com.hk', 'com.sg', 'co.jp', 'co.kr', 'co.nz', 'co.za', 'com.mx', 'com.tr', 'com.tw', 'com.ar', 'com.ua', 'com.pl',
-])
-
-function parseDomainParts(hostname: string) {
-  const labels = hostname.split('.').filter(Boolean)
-  if (labels.length <= 1) return { subdomain: '', domain: hostname, tld: '' }
-  if (/^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname)) return { subdomain: '', domain: hostname, tld: '' }
-  const suffix2 = labels.slice(-2).join('.').toLowerCase()
-  const suffixLabels = COMMON_MULTI_LABEL_SUFFIXES.has(suffix2) ? 2 : 1
-  const tld = `.${labels.slice(-suffixLabels).join('.')}`
-  const domainIndex = labels.length - suffixLabels - 1
-  const domain = labels.slice(Math.max(0, domainIndex), labels.length).join('.')
-  const subdomain = labels.slice(0, Math.max(0, domainIndex)).join('.')
-  return { subdomain, domain, tld }
-}
-
-function isSensitiveQueryKey(key: string) {
-  return ['token', 'auth', 'pass', 'password', 'key', 'session', 'redirect', 'url', 'return', 'code', 'secret'].some(term => key.toLowerCase().includes(term))
-}
-
-export function parseUrlLocally(rawInputUrl: string): LocalUrlPreview {
-  let candidate = rawInputUrl.trim()
-  if (!/^https?:\/\//i.test(candidate)) candidate = `https://${candidate}`
-  const parsed = new URL(candidate)
-  const hostname = parsed.hostname
-  const { subdomain, domain, tld } = parseDomainParts(hostname)
-  const port = parsed.port || (parsed.protocol === 'https:' ? '443' : parsed.protocol === 'http:' ? '80' : '')
-  const queryParams: UrlQueryParam[] = []
-  parsed.searchParams.forEach((value, key) => queryParams.push({ key, value, isSensitive: isSensitiveQueryKey(key) }))
-  const urlParts: UrlParts = {
-    scheme: parsed.protocol.replace(':', ''),
-    subdomain: subdomain || '—',
-    domain: domain || hostname,
-    tld: tld || '—',
-    port: port || '—',
-    path: parsed.pathname || '/',
-    queryString: parsed.search ? parsed.search.slice(1) : '—',
-    querySeparator: parsed.search ? '?' : '—',
-    fragment: parsed.hash ? parsed.hash.slice(1) : '—',
-    queryParams,
+  dns: {
+    hostname: string
+    registrable_domain?: string | null
+    status: string
+    resolved_ips: string[]
+    hostname_records?: Record<string, { record_type: string; queried_name: string; status: string; records: string[]; error?: string | null }>
+    domain_records?: Record<string, { record_type: string; queried_name: string; status: string; records: string[]; error?: string | null }>
+    hostname_txt_records?: { record_type: string; queried_name: string; status: string; records: string[]; error?: string | null } | null
+    records?: Record<string, { record_type: string; queried_name: string; status: string; records: string[]; error?: string | null }>
   }
-  return {
-    normalizedUrl: parsed.toString(), urlParts, protocol: parsed.protocol, hostname, domain, tld,
-    path: parsed.pathname || '/', fragment: parsed.hash.slice(1), port, queryParams,
-    entropy: calculateShannonEntropy(parsed.toString()),
+  ip_intelligence: {
+    status: string
+    total_ips: number
+    public_ips: number
+    enriched_ips: number
+    lookup_limit: number
+    limit_reached: boolean
+    results: Array<{
+      ip: string
+      version: 4 | 6
+      classification: string
+      status: string
+      source?: string | null
+      country_code?: string | null
+      country_name?: string | null
+      region?: string | null
+      region_code?: string | null
+      city?: string | null
+      postal?: string | null
+      latitude?: number | null
+      longitude?: number | null
+      timezone?: string | null
+      asn?: string | null
+      organization?: string | null
+      hostname?: string | null
+      error?: string | null
+    }>
   }
+  whois?: {
+    domain: string
+    status: string
+    source?: string | null
+    rdap_server?: string | null
+    registration_date?: string | null
+    expiration_date?: string | null
+    last_updated_date?: string | null
+    events?: Array<{ action: string; date?: string | null }>
+    registrar_name?: string | null
+    registrar_id?: string | null
+    registry_name?: string | null
+    registry_id?: string | null
+    domain_status: string[]
+    nameservers: Array<{ hostname: string; ipv4?: string[]; ipv6?: string[] }>
+    dnssec?: string | null
+    redacted: boolean
+    error?: string | null
+  } | null
+  osint?: {
+    status: string
+    providers: BackendOSINTProvider[]
+    matches: Array<{
+      source: string
+      match_type: string
+      indicator: string
+      reference?: string | null
+      details?: Record<string, unknown>
+    }>
+    total_matches: number
+  } | null
+  security?: BackendSecurityResult | null
+  dns_security?: BackendSecurityResult | null
+  ip_security?: BackendSecurityResult | null
+  whois_security?: BackendSecurityResult | null
+  osint_security?: BackendSecurityResult | null
+  correlation_security?: BackendSecurityResult | null
+  final_assessment?: {
+    status: 'completed'
+    verdict: 'confirmed_threat_evidence' | 'suspicious_indicators' | 'no_significant_evidence' | 'inconclusive'
+    confidence: 'low' | 'medium' | 'high'
+    summary: string
+    rationale: string[]
+    evidence_summary: Record<string, unknown>
+    coverage: Record<string, unknown>
+  } | null
+}
+function formatDate(value?: string | null): string {
+  if (!value) return 'Not published'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toISOString().slice(0, 10)
 }
 
-async function fetchRemoteAnalysis(url: string): Promise<AnalysisDetails> {
-  const endpoint = getAnalysisEndpoint()
-
-  let response: Response
+function maskUrlForDisplay(url: string, queryParameters: Array<{ name: string; value: string; values: string[] }>, hasCredentials: boolean): string {
   try {
-    response = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
-    })
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : 'Network request failed'
-    throw new Error(
-      `Could not reach the FastAPI analysis service. ${reason}. Start the backend with ` +
-      `python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000 and keep the /api proxy enabled.`
-    )
+    const parsed = new URL(url)
+    if (hasCredentials) {
+      parsed.username = '••••'
+      parsed.password = '••••'
+    }
+    const sensitiveNames = new Set([
+      'access_token', 'apikey', 'api_key', 'auth', 'authorization', 'code', 'credential', 'credentials',
+      'id_token', 'otp', 'pass', 'passwd', 'password', 'pin', 'refresh_token', 'secret', 'session', 'sessionid',
+      'sid', 'token',
+    ])
+    for (const param of queryParameters) {
+      if (sensitiveNames.has(param.name.trim().toLowerCase())) {
+        parsed.searchParams.delete(param.name)
+        parsed.searchParams.append(param.name, '••••••••')
+      }
+    }
+    return parsed.toString()
+  } catch {
+    return url
   }
-
-  let payload: any = null
-  try { payload = await response.json() } catch { /* handled below */ }
-
-  if (!response.ok) {
-    const detail = payload?.detail || `Backend returned HTTP ${response.status}`
-    throw new Error(detail)
-  }
-
-  return payload as AnalysisDetails
 }
 
+function collectBackendFindings(raw: BackendAnalysisResponse): BackendSecurityFinding[] {
+  return [
+    raw.security,
+    raw.dns_security,
+    raw.ip_security,
+    raw.whois_security,
+    raw.osint_security,
+    raw.correlation_security,
+  ].flatMap((result) => result?.findings || [])
+}
+
+function mapAssessmentVerdict(verdict?: 'confirmed_threat_evidence' | 'suspicious_indicators' | 'no_significant_evidence' | 'inconclusive'): Verdict {
+  switch (verdict) {
+    case 'confirmed_threat_evidence':
+      return 'MALICIOUS'
+    case 'suspicious_indicators':
+      return 'SUSPICIOUS'
+    case 'no_significant_evidence':
+      return 'SAFE'
+    default:
+      return 'INCONCLUSIVE'
+  }
+}
+
+function mapBackendAnalysisToDetails(raw: BackendAnalysisResponse): AnalysisDetails {
+  if (!raw?.success || !raw.url) {
+    throw new Error('The analysis backend returned an incomplete analysis payload.')
+  }
+
+  const normalized = raw.url.normalized || raw.url.original
+  const registrableDomain = raw.url.registrable_domain || raw.url.domain || raw.url.hostname
+  const queryParams = (raw.url.query_parameters || []).map((param) => ({
+    key: param.name,
+    value: param.value || '',
+    maskedValue: param.value || '',
+    isSensitive: false,
+    decoded: param.value || '',
+  }))
+  const findings = collectBackendFindings(raw)
+  const sensitiveFindings = findings.filter((finding) => finding.rule_id === 'URL-SENSITIVE-PARAMS')
+  const sensitiveNames = new Set<string>()
+  for (const finding of sensitiveFindings) {
+    const names = finding.evidence?.['parameters']
+    if (Array.isArray(names)) names.forEach((name) => sensitiveNames.add(String(name)))
+  }
+  for (const param of queryParams) {
+    if (sensitiveNames.has(param.key)) {
+      param.isSensitive = true
+      param.maskedValue = '••••••••'
+    }
+  }
+
+  const whois: AnalysisDetails['whois'] = raw.whois
+    ? {
+        domain: raw.whois.domain || registrableDomain,
+        registrar: raw.whois.registrar_name || 'Not published',
+        creationDate: formatDate(raw.whois.registration_date),
+        domainAgeDays: 0,
+        domainAgeFormatted: raw.whois.registration_date ? 'Available from registration date' : 'Not published',
+        status: raw.whois.domain_status?.length ? raw.whois.domain_status.join(', ') : raw.whois.status,
+        isNewlyRegistered: findings.some((f) => f.rule_id === 'WHOIS-RECENTLY-REGISTERED'),
+        dnssec: raw.whois.dnssec || 'Not published',
+        cautionNote: undefined,
+        expirationDate: raw.whois.expiration_date ? formatDate(raw.whois.expiration_date) : null,
+        updatedDate: raw.whois.last_updated_date ? formatDate(raw.whois.last_updated_date) : null,
+        nameservers: (raw.whois.nameservers || []).map((ns) => ns.hostname),
+        source: raw.whois.source || 'RDAP',
+        lookupStatus: raw.whois.status === 'success' ? 'ok' : raw.whois.status === 'rate_limited' ? 'partial' : 'failed',
+        lookupNote: raw.whois.error || null,
+        registered: raw.whois.status === 'success',
+      }
+    : {
+        domain: registrableDomain,
+        registrar: 'Not published',
+        creationDate: 'Not published',
+        domainAgeDays: 0,
+        domainAgeFormatted: 'Not published',
+        status: 'not_applicable',
+        isNewlyRegistered: false,
+        dnssec: 'Not published',
+        cautionNote: undefined,
+        expirationDate: null,
+        updatedDate: null,
+        nameservers: [],
+        source: 'none',
+        lookupStatus: 'failed' as const,
+        lookupNote: null,
+        registered: false,
+      }
+
+  const structure: AnalysisDetails['structure'] = {
+    hasSuspiciousPath: findings.some((f) => f.rule_id === 'URL-SUSPICIOUS-PATH'),
+    suspiciousKeywords: [],
+    hasEncodedChars: findings.some((f) => f.rule_id === 'URL-HIGH-ENCODING' || f.rule_id === 'URL-DOUBLE-ENCODING'),
+    hasObfuscatedQuery: findings.some((f) => ['URL-HIGH-ENCODING', 'URL-DOUBLE-ENCODING', 'URL-MANY-QUERY-PARAMS'].includes(f.rule_id)),
+    hasIpHostname: raw.url.is_ip_address,
+    isHttps: raw.url.scheme === 'https',
+    hasOpaquePath: false,
+    hasRedirectParameter: false,
+    isTrackingOrRedirectService: false,
+    isUrlShortener: false,
+    encodedSegments: [],
+    doubleEncoded: findings.some((f) => f.rule_id === 'URL-DOUBLE-ENCODING'),
+    hasUserInfo: raw.url.has_credentials,
+    subdomainDepth: raw.url.subdomain ? raw.url.subdomain.split('.').filter(Boolean).length : 0,
+    redirectTargets: [],
+    explanation: raw.security?.observations?.join(' ') || 'Structural URL analysis was completed by the backend.',
+  }
+
+  const domainStatus: DomainStatus = raw.url.is_ip_address
+    ? {
+        state: 'ip_host',
+        exists: true,
+        title: 'IP address hostname',
+        detail: 'The submitted URL points directly to an IP address.',
+        confidence: 'high',
+        evidence: [raw.url.hostname],
+        ips: raw.dns.resolved_ips || [],
+      }
+    : {
+        state: raw.dns.status === 'resolved' ? 'live' : raw.dns.status === 'nxdomain' ? 'nonexistent' : 'unknown',
+        exists: raw.dns.status === 'resolved',
+        title: raw.dns.status === 'resolved' ? 'Hostname resolved' : raw.dns.status === 'nxdomain' ? 'Hostname does not exist' : 'Domain state inconclusive',
+        detail: raw.dns.status === 'resolved' ? 'DNS resolution returned one or more addresses.' : raw.dns.status === 'nxdomain' ? 'DNS reported that the queried name does not exist.' : `DNS status: ${raw.dns.status}.`,
+        confidence: raw.dns.status === 'resolved' || raw.dns.status === 'nxdomain' ? 'high' : 'medium',
+        evidence: raw.dns.resolved_ips || [],
+        ips: raw.dns.resolved_ips || [],
+      }
+
+  const assessment = raw.final_assessment
+  const verdict = mapAssessmentVerdict(assessment?.verdict)
+  const reasons = findings.map((finding) => ({
+    title: finding.title,
+    detail: finding.description,
+    severity: finding.severity,
+  }))
+  if (assessment?.rationale?.length) {
+    assessment.rationale.forEach((item) => reasons.push({ title: 'Assessment rationale', detail: item, severity: 'info' }))
+  }
+  if (!reasons.length) {
+    reasons.push({ title: 'No security findings returned', detail: 'The backend completed its analysis without returning actionable security findings.', severity: 'info' })
+  }
+
+  const providerRows = (raw.osint?.providers || []).map((provider) => ({
+    name: provider.source,
+    state: provider.status,
+    detail: provider.error || (provider.matched ? `${provider.match_count} match(es)` : 'No matching evidence returned'),
+  }))
+
+  return {
+    url: raw.url.original || raw.url.normalized,
+    maskedUrl: maskUrlForDisplay(raw.url.original || raw.url.normalized, raw.url.query_parameters || [], raw.url.has_credentials),
+    normalizedUrl: normalized,
+    protocol: raw.url.scheme,
+    hostname: raw.url.hostname,
+    domain: registrableDomain,
+    tld: raw.url.tld ? `.${raw.url.tld.replace(/^\./, '')}` : '',
+    path: raw.url.path || '/',
+    queryParams,
+    threatScore: undefined,
+    score: undefined,
+    confidence: assessment?.confidence,
+    summary: assessment?.summary || 'The backend completed the URL analysis.',
+    verdict,
+    osint: {
+      url: raw.url.original,
+      hostname: raw.url.hostname,
+      domain: registrableDomain,
+      subdomain: raw.url.subdomain || undefined,
+      tld: raw.url.tld || undefined,
+      scheme: raw.url.scheme,
+      dnsStatus: raw.dns.status,
+      resolvedIps: raw.dns.resolved_ips || [],
+      ipv6: raw.dns.hostname_records?.AAAA?.records || [],
+      cname: raw.dns.hostname_records?.CNAME?.records || [],
+      domainState: raw.dns.status,
+      domainExists: raw.dns.status === 'resolved' ? true : raw.dns.status === 'nxdomain' ? false : undefined,
+      domainConfidence: raw.dns.status === 'resolved' || raw.dns.status === 'nxdomain' ? 'high' : 'medium',
+      queryParameterCount: raw.url.query_parameters?.reduce((sum, p) => sum + Math.max(1, p.values?.length || 0), 0) || 0,
+    },
+    entropy: {
+      domainEntropy: 0,
+      urlEntropy: 0,
+      level: 'Not provided by current backend API',
+      explanation: 'The current backend response does not expose entropy metrics.',
+    },
+    typosquatting: {
+      detected: false,
+      explanation: 'The current backend response does not expose a dedicated typosquatting result.',
+    },
+    homoglyphs: {
+      detected: false,
+      characters: [],
+      explanation: 'The current backend response does not expose a dedicated homoglyph result.',
+    },
+    structure,
+    whois,
+    providers: {
+      dns: {
+        status: raw.dns.status,
+        ips: raw.dns.resolved_ips || [],
+      },
+      rdap: raw.whois,
+      ip_geolocation: raw.ip_intelligence,
+      osint: raw.osint,
+    },
+    providerRows,
+    domainStatus,
+    reasons,
+    intelligence: {
+      dns: {
+        ips: raw.dns.resolved_ips || [],
+        ipv6: raw.dns.hostname_records?.AAAA?.records || [],
+        cname: raw.dns.hostname_records?.CNAME?.records || [],
+        status: raw.dns.status,
+      },
+      reputation: {},
+      ipIntelligence: {
+        ip: raw.ip_intelligence.results?.[0]?.ip,
+        geolocation: raw.ip_intelligence.results?.[0]
+          ? {
+              country: raw.ip_intelligence.results[0].country_name || undefined,
+              region: raw.ip_intelligence.results[0].region || undefined,
+              city: raw.ip_intelligence.results[0].city || undefined,
+              latitude: raw.ip_intelligence.results[0].latitude || undefined,
+              longitude: raw.ip_intelligence.results[0].longitude || undefined,
+              asn: raw.ip_intelligence.results[0].asn || undefined,
+              org: raw.ip_intelligence.results[0].organization || undefined,
+            }
+          : undefined,
+      },
+      signals: findings.map((finding) => ({
+        name: finding.title,
+        score: 0,
+        detail: finding.description,
+        severity: finding.severity,
+      })),
+      providers: providerRows,
+      providerTotal: providerRows.length,
+    },
+  }
+}
 // Preset Samples for quick testing
 const SAMPLE_URLS = [
   { label: 'PayPal Spoof', url: 'https://secure-paypa1-login.com/account/verify?token=8f9a2b1c', type: 'Typosquatting' },
@@ -305,13 +631,13 @@ const SAMPLE_URLS = [
 
 // Inspection Steps for Scanner Flow
 const SCAN_STEPS = [
-  { id: '01', name: 'Inspecting URL Structure', desc: 'Scheme, host, subdomain, port, path & query' },
-  { id: '02', name: 'Resolving Network Identity', desc: 'DNS A/AAAA records and destination IPs' },
-  { id: '03', name: 'Checking WHOIS / RDAP', desc: 'Registration, registrar, age & nameservers' },
-  { id: '04', name: 'Running OSINT Lookups', desc: 'Subdomains, reverse-IP & public scan sightings' },
-  { id: '05', name: 'Inspecting Characters', desc: 'Unicode homoglyphs and lookalike indicators' },
-  { id: '06', name: 'Analyzing Query Semantics', desc: 'Sensitive keys, encoding & entropy signals' },
-  { id: '07', name: 'Building Risk Assessment', desc: 'Evidence-based score from returned signals' },
+  { id: '01', name: 'Inspecting URL Structure', desc: 'Protocol, Host, Subdomains, Query Tokens' },
+  { id: '02', name: 'Checking Domain & TLD', desc: 'Syntax validation, DNS origin structure' },
+  { id: '03', name: 'Detecting Typosquatting', desc: 'Brand imitation, leet-speak & edit distance' },
+  { id: '04', name: 'Detecting Homoglyphs', desc: 'Unicode lookalike and Cyrillic character scanner' },
+  { id: '05', name: 'Analyzing Shannon Entropy', desc: 'Randomness metrics & payload obfuscation' },
+  { id: '06', name: 'Inspecting URL Path & Query', desc: 'Credential harvesting keywords & hex encoding' },
+  { id: '07', name: 'Querying Network Intelligence', desc: 'DNS resolution, RDAP registration & IP geolocation' },
 ]
 
 // SVG Icons & UI Graphics
@@ -351,6 +677,103 @@ function SearchPulseIcon() {
   )
 }
 
+// Cybersecurity Shield Logo Mark
+function PhishGuardShieldLogo({ size = 32 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 36 36"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className="brand-shield-svg"
+      aria-hidden="true"
+    >
+      <defs>
+        {/* Shield Deep Navy Gradient */}
+        <linearGradient id="pgShieldDarkBg" x1="18" y1="2" x2="18" y2="34" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#0F1B36" />
+          <stop offset="60%" stopColor="#080E1E" />
+          <stop offset="100%" stopColor="#040711" />
+        </linearGradient>
+
+        {/* Shield Border Gradient with Cyan and Deep Navy */}
+        <linearGradient id="pgShieldBorder" x1="4" y1="2" x2="32" y2="34" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#38BDF8" stopOpacity="0.85" />
+          <stop offset="45%" stopColor="#00F5D4" stopOpacity="0.4" />
+          <stop offset="100%" stopColor="#1E3A8A" stopOpacity="0.9" />
+        </linearGradient>
+
+        {/* Cyan/Teal Emblem Gradient */}
+        <linearGradient id="pgCyanTeal" x1="9" y1="8" x2="27" y2="28" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#00F5D4" />
+          <stop offset="50%" stopColor="#00E5FF" />
+          <stop offset="100%" stopColor="#0284C7" />
+        </linearGradient>
+
+        <linearGradient id="pgCoreGlow" x1="18" y1="11" x2="18" y2="25" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#5EEAD4" />
+          <stop offset="100%" stopColor="#06B6D4" />
+        </linearGradient>
+
+        {/* Subtle Cyber Glow Filter */}
+        <filter id="pgShieldGlow" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="0" stdDeviation="1.2" floodColor="#00F5D4" floodOpacity="0.45" />
+        </filter>
+      </defs>
+
+      {/* Outer Shield Plate */}
+      <path
+        d="M18 2.5C24.8 2.5 31.5 5 31.5 5C31.5 5 32.5 18.2 18 33.5C3.5 18.2 4.5 5 4.5 5C4.5 5 11.2 2.5 18 2.5Z"
+        fill="url(#pgShieldDarkBg)"
+        stroke="url(#pgShieldBorder)"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+
+      {/* Inner Subtle Shield Rim */}
+      <path
+        d="M18 5C23.2 5 28.5 7 28.5 7C28.5 7 29.2 17.5 18 29.8C6.8 17.5 7.5 7 7.5 7C7.5 7 12.8 5 18 5Z"
+        fill="none"
+        stroke="#1E293B"
+        strokeWidth="0.8"
+        strokeDasharray="2 2"
+        opacity="0.6"
+      />
+
+      {/* Cyber Security Emblem: Interlocking PhishGuard Geometric Crest */}
+      <g filter="url(#pgShieldGlow)">
+        {/* Core Shield Emblem Contour */}
+        <path
+          d="M18 9C21.8 9 25 10.6 25 14.5C25 19.8 18 25 18 25C18 25 11 19.8 11 14.5C11 10.6 14.2 9 18 9Z"
+          fill="none"
+          stroke="url(#pgCyanTeal)"
+          strokeWidth="1.8"
+          strokeLinejoin="round"
+        />
+
+        {/* Inner Node Crosshair & Radar Lines */}
+        <path
+          d="M18 12.5V21.5"
+          stroke="url(#pgCoreGlow)"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
+        <path
+          d="M14.5 16H21.5"
+          stroke="url(#pgCoreGlow)"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+        />
+
+        {/* Center Node Core */}
+        <circle cx="18" cy="16" r="2.2" fill="#00F5D4" />
+        <circle cx="18" cy="16" r="0.9" fill="#040711" />
+      </g>
+    </svg>
+  )
+}
+
 // Brand Logo
 function Logo({ onNavigate }: { onNavigate: (route: PageRoute) => void }) {
   return (
@@ -360,10 +783,8 @@ function Logo({ onNavigate }: { onNavigate: (route: PageRoute) => void }) {
       onClick={() => onNavigate('scanner')}
       aria-label="PhishGuard Home"
     >
-      <div className="brand-mark">
-        <span className="mark-bar mark-bar-1" />
-        <span className="mark-bar mark-bar-2" />
-        <span className="mark-bar mark-bar-3" />
+      <div className="brand-mark brand-shield-mark">
+        <PhishGuardShieldLogo size={32} />
       </div>
       <div className="brand-text">
         <span className="brand-name">PHISHGUARD</span>
@@ -383,10 +804,9 @@ function Navbar({
 }) {
   const [mobileOpen, setMobileOpen] = useState(false)
   const navItems: Array<{ id: PageRoute; label: string }> = [
-    { id: 'scanner', label: 'Scanner' },
+    { id: 'scanner', label: 'Home' },
     { id: 'analysis', label: 'Analysis' },
-    { id: 'how-it-works', label: 'How It Works' },
-    { id: 'capabilities', label: 'Capabilities' },
+    { id: 'blog', label: 'Blog' },
     { id: 'education', label: 'Education' },
     { id: 'about', label: 'About' },
     { id: 'support', label: 'Support' },
@@ -442,7 +862,7 @@ function Navbar({
 }
 
 // Threat Gauge Circular Meter Component with Animated Score
-function ThreatScoreGauge({ score, verdict }: { score: number; verdict: Verdict }) {
+function ThreatScoreGauge({ score, verdict }: { score?: number; verdict: Verdict | 'UNREACHABLE' }) {
   const [displayedScore, setDisplayedScore] = useState(0)
   const radius = 86
   const stroke = 12
@@ -452,7 +872,7 @@ function ThreatScoreGauge({ score, verdict }: { score: number; verdict: Verdict 
   useEffect(() => {
     // Respect reduced-motion preferences
     if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      setDisplayedScore(score)
+      setDisplayedScore(score ?? 0)
       return
     }
 
@@ -464,13 +884,13 @@ function ThreatScoreGauge({ score, verdict }: { score: number; verdict: Verdict 
       const progress = Math.min(elapsed / duration, 1)
       // Ease out cubic
       const ease = 1 - Math.pow(1 - progress, 3)
-      const current = Math.round(ease * score)
+      const current = Math.round(ease * (score ?? 0))
       setDisplayedScore(current)
 
       if (progress < 1) {
         requestAnimationFrame(animateNumber)
       } else {
-        setDisplayedScore(score)
+        setDisplayedScore(score ?? 0)
       }
     }
 
@@ -478,9 +898,9 @@ function ThreatScoreGauge({ score, verdict }: { score: number; verdict: Verdict 
     return () => cancelAnimationFrame(frameId)
   }, [score])
 
-  const strokeDashoffset = circumference - (displayedScore / 100) * circumference
+  const strokeDashoffset = circumference - ((score ?? 0) / 100) * circumference
   const verdictColorClass =
-    verdict === 'SAFE' ? 'color-safe' : verdict === 'SUSPICIOUS' ? 'color-suspicious' : 'color-malicious'
+    verdict === 'SAFE' ? 'color-safe' : verdict === 'SUSPICIOUS' ? 'color-suspicious' : verdict === 'UNREACHABLE' ? 'color-unreachable' : 'color-malicious'
 
   return (
     <div className={`threat-gauge-container ${verdictColorClass} threat-gauge-scale-in`}>
@@ -509,9 +929,9 @@ function ThreatScoreGauge({ score, verdict }: { score: number; verdict: Verdict 
           />
         </svg>
         <div className="gauge-center-content">
-          <span className="gauge-score-value">{displayedScore}</span>
-          <span className="gauge-score-total">/ 100</span>
-          <span className="gauge-score-badge">{verdict}</span>
+          <span className="gauge-score-value">{typeof score === 'number' ? displayedScore : '—'}</span>
+          <span className="gauge-score-total">{typeof score === 'number' ? '/ 100' : 'evidence'}</span>
+          <span className="gauge-score-badge">{verdict === 'UNREACHABLE' ? 'NOT FOUND' : verdict}</span>
         </div>
       </div>
       <div className="gauge-scale-legend">
@@ -919,25 +1339,171 @@ export function UrlInspectorCard({
 }
 
 // --------------------------------------------------------------------------
-// PAGE 1: SCANNER PAGE (/scanner)
+// --------------------------------------------------------------------------
+// PAGE 1: FULL AUTOMARK-INSPIRED LANDING PAGE (/scanner / home)
 // --------------------------------------------------------------------------
 function ScannerPage({
   onStartInspection,
+  onNavigate,
 }: {
   onStartInspection: (url: string) => void
+  onNavigate: (route: PageRoute) => void
 }) {
   const [isInspecting, setIsInspecting] = useState(false)
+  const [activeExplodedPart, setActiveExplodedPart] = useState<'protocol' | 'subdomain' | 'brand' | 'tld' | 'path' | 'query'>('brand')
+  const [demoGaugeVerdict, setDemoGaugeVerdict] = useState<'SAFE' | 'SUSPICIOUS' | 'MALICIOUS'>('MALICIOUS')
+  const [openFaqIndex, setOpenFaqIndex] = useState<number | null>(0)
+
+  // Scroll reveal & glow response
+  const capabilitiesSectionRef = React.useRef<HTMLElement>(null)
+  const [capabilitiesInView, setCapabilitiesInView] = useState(false)
+  const [scrollGlowScale, setScrollGlowScale] = useState(1)
+
+  useEffect(() => {
+    const el = capabilitiesSectionRef.current
+    if (!el) return
+
+    // If user prefers reduced motion, reveal immediately
+    if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setCapabilitiesInView(true)
+      return
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            setCapabilitiesInView(true)
+          }
+        })
+      },
+      { threshold: 0.12, rootMargin: '0px 0px -40px 0px' }
+    )
+
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  // Passive subtle scroll response for the golden transition glow
+  useEffect(() => {
+    let animFrame = 0
+    const onScroll = () => {
+      const el = capabilitiesSectionRef.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      const vh = window.innerHeight
+      const dist = Math.abs(rect.top - vh * 0.45)
+      const maxDist = vh * 0.75
+      const factor = Math.max(0, 1 - dist / maxDist)
+      setScrollGlowScale(1 + factor * 0.15)
+    }
+
+    window.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      cancelAnimationFrame(animFrame)
+    }
+  }, [])
 
   const handleInspect = (url: string) => {
+    if (!url.trim() || isInspecting) return
     setIsInspecting(true)
-    setTimeout(() => {
-      onStartInspection(url)
-    }, 180)
+    onStartInspection(url.trim())
+  }
+
+  const scrollToScanner = () => {
+    const scannerEl = document.getElementById('hero-scanner-card-anchor')
+    if (scannerEl) {
+      scannerEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    } else {
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }
+
+  const demoScores = {
+    SAFE: { score: 6, verdict: 'SAFE' as Verdict, title: 'github.com', desc: 'Legitimate domain registered over 16 years ago. Clean ASCII characters, authentic certificate, and standard lexical entropy.' },
+    SUSPICIOUS: { score: 48, verdict: 'SUSPICIOUS' as Verdict, title: 'account-security-update-2026.net', desc: 'Domain created 14 days ago with sensitive action keywords (/verify/session) and elevated parameter entropy.' },
+    MALICIOUS: { score: 94, verdict: 'MALICIOUS' as Verdict, title: 'secure-paypa1-verification.com', desc: 'Critical brand typosquatting detected. Character substitution ("1" for "l") combined with high-entropy credential harvesting token.' },
+  }
+
+  const faqItems = [
+    {
+      q: 'Does PhishGuard open the suspicious webpage in my browser?',
+      a: 'No. PhishGuard operates in a strictly non-executing sandbox. It parses the URL syntactically, evaluates Unicode character code points, computes mathematical Shannon entropy, and queries public WHOIS/RDAP registry databases. Malicious JavaScript, executable binaries, and tracking cookies from the target site are never loaded or executed on your machine.',
+    },
+    {
+      q: 'What is the difference between typosquatting and homoglyphs?',
+      a: 'Typosquatting involves registering domains with common typing errors, character substitutions (such as substituting the number "1" for the letter "l"), or prepending deceptive security words. Homoglyphs, on the other hand, exploit Internationalized Domain Names (IDNs) by swapping Latin characters with visually identical characters from Cyrillic or Greek alphabets (e.g. Cyrillic "а" U+0430 vs Latin "a" U+0061).',
+    },
+    {
+      q: 'Why does domain age matter when evaluating a URL?',
+      a: 'Cybercriminals frequently stand up disposable domain infrastructure hours or days before launching targeted phishing attacks to bypass traditional static blocklists. A domain registered under 30 days ago that uses brand keywords or asks for credentials is significantly more risky than established domains with years of tenure.',
+    },
+    {
+      q: 'What is Shannon Entropy and how does PhishGuard calculate it?',
+      a: 'Shannon entropy measures the mathematical unpredictability and information density of characters within a text string (measured in bits per character). Standard human-readable URLs typically exhibit low entropy (2.5–3.8 bits/char), while base64 tokens, hash strings, and obfuscated credential-smuggling parameters produce high entropy (4.5–6.0+ bits/char).',
+    },
+    {
+      q: 'Does PhishGuard store or share the URLs I inspect?',
+      a: 'No. Inspections are performed in-memory during your active session. We do not sell URL logs, store credential payloads, or share telemetry with third-party advertising networks.',
+    },
+    {
+      q: 'Can PhishGuard detect phishing links that use valid HTTPS certificates?',
+      a: 'Yes. Modern phishing sites almost universally use free automated SSL/TLS certificates (e.g., Let\'s Encrypt) to display the padlock icon. PhishGuard looks far beyond SSL encryption by analyzing lexical structure, brand imitation, homoglyphs, entropy, and domain tenure.',
+    },
+  ]
+
+  const explodedPartsData = {
+    protocol: {
+      label: 'PROTOCOL SCHEME',
+      snippet: 'https://',
+      status: 'Encrypted Transport',
+      badge: 'Transport Layer',
+      desc: 'Indicates the communication protocol. While HTTPS ensures transport encryption, modern phishing campaigns routinely utilize automated SSL certificates to project false authenticity.',
+    },
+    subdomain: {
+      label: 'SUBDOMAIN PREFIX',
+      snippet: 'secure-login.',
+      status: 'Deceptive Keyword Framing',
+      badge: 'Social Engineering',
+      desc: 'Attackers frequently prepend words like "secure", "login", "verify", or "auth" into the subdomain to trick users into believing they are interacting with an official authentication service.',
+    },
+    brand: {
+      label: 'SLD (SECOND-LEVEL DOMAIN)',
+      snippet: 'paypa1',
+      status: 'Typosquatting Detected',
+      badge: 'Critical Brand Mimicry',
+      desc: 'The actual registered name. In this example, the number "1" has been substituted for the lowercase letter "l" to deceive readers into thinking it is the official PayPal domain.',
+    },
+    tld: {
+      label: 'TLD (TOP-LEVEL DOMAIN)',
+      snippet: '.com',
+      status: 'Commercial Registry',
+      badge: 'DNS Zone',
+      desc: 'The top-level registry. PhishGuard audits registry reputation and queries WHOIS/RDAP to inspect the exact registration timestamp and registrar profile.',
+    },
+    path: {
+      label: 'URI PATH',
+      snippet: '/portal/session/verify',
+      status: 'Credential Harvesting Target',
+      badge: 'Action Intent',
+      desc: 'The path points to the specific server resource. Paths containing phrases like "/session/verify" or "/wallet/auth" suggest an active authentication interception workflow.',
+    },
+    query: {
+      label: 'QUERY PARAMETERS',
+      snippet: '?token=cGFzc3dvcmRfZGF0YQ%3D%3D',
+      status: 'High-Entropy Payload (4.92 bits/char)',
+      badge: 'Encoded Payload',
+      desc: 'Query strings carry dynamic data. High-entropy encoded strings frequently conceal base64 payloads, victim identifiers, or multi-hop redirect endpoints.',
+    },
   }
 
   return (
-    <div className="page-view scanner-page-view">
-      <section className="hero-editorial-section">
+    <div className="page-view scanner-page-view automark-landing-view">
+      {/* ------------------------------------------------------------------
+          HERO SECTION (Automark Composition + Live URL Inspector)
+          ------------------------------------------------------------------ */}
+      <section className="hero-editorial-section" id="hero-scanner-card-anchor">
         <div className="hero-container">
           <div className="hero-grid">
             <div className="hero-editorial-copy">
@@ -955,17 +1521,965 @@ function ScannerPage({
                 PhishGuard analyzes suspicious URLs, spoofed domains, domain registration data, URL structure, entropy, typosquatting, and homoglyph indicators before you interact with the destination.
               </p>
 
+              <div className="hero-actions-row">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={scrollToScanner}
+                >
+                  <span>Launch URL Inspector</span>
+                  <ArrowUpRight />
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => onNavigate('blog')}
+                >
+                  <span>Read Security Blog</span>
+                </button>
+              </div>
+
               <div className="hero-trust-block">
                 <ShieldCheckIcon />
                 <div className="trust-text">
-                  <strong>Safe URL Sandbox</strong>
-                  <span>Inspect links safely without browser script execution.</span>
+                  <strong>Safe Non-Executing Sandbox</strong>
+                  <span>Links are parsed syntactically. Malicious destination scripts never execute in your browser.</span>
                 </div>
               </div>
             </div>
 
             <div className="hero-scanner-col">
               <UrlInspectorCard onInspect={handleInspect} isInspecting={isInspecting} />
+            </div>
+          </div>
+
+          {/* Automark-Style Hero Telemetry Stats Strip */}
+          <div className="hero-stats-strip">
+            <div className="hero-stat-item">
+              <span className="hero-stat-number">0%</span>
+              <span className="hero-stat-label">Client Script Execution</span>
+              <span className="hero-stat-desc">Zero browser execution risk</span>
+            </div>
+            <div className="hero-stat-item">
+              <span className="hero-stat-number">6</span>
+              <span className="hero-stat-label">Forensic Audit Layers</span>
+              <span className="hero-stat-desc">Lexical, Unicode, WHOIS &amp; Entropy</span>
+            </div>
+            <div className="hero-stat-item">
+              <span className="hero-stat-number">0–100</span>
+              <span className="hero-stat-label">Explainable Risk Index</span>
+              <span className="hero-stat-desc">Deterministic scoring with findings</span>
+            </div>
+            <div className="hero-stat-item">
+              <span className="hero-stat-number">Live</span>
+              <span className="hero-stat-label">WHOIS / RDAP Intelligence</span>
+              <span className="hero-stat-desc">Domain age &amp; registrar scrutiny</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 01: THE PROBLEM / THREAT LANDSCAPE
+          ------------------------------------------------------------------ */}
+      <section className="section threat-landscape-section">
+        <div className="section-container">
+          <div className="section-intro">
+            <span className="editorial-eyebrow">THE THREAT LANDSCAPE</span>
+            <h2 className="section-title">Would you know a phishing URL when you see one?</h2>
+            <p className="section-subtitle">
+              Modern attacks no longer look like obvious spam. Attackers exploit subtle human cognitive blind spots, lookalike character scripts, throwaway DNS infrastructure, and obfuscated parameters.
+            </p>
+          </div>
+
+          <div className="threat-cards-grid">
+            <div className="threat-card">
+              <div className="threat-card-num">01</div>
+              <span className="threat-card-badge">VISUAL SPOOFING</span>
+              <h3 className="threat-card-title">Lookalike Characters &amp; Homoglyphs</h3>
+              <p className="threat-card-desc">
+                Attackers use Unicode characters from Cyrillic or Greek alphabets (like Cyrillic 'а' or 'ӏ') that render identically to Latin letters on standard screens.
+              </p>
+              <div className="threat-card-demo">
+                <code>goog<span className="text-malicious font-bold">ӏ</span>e.com</code>
+                <span className="threat-demo-note">U+04CF Cyrillic Palochka</span>
+              </div>
+            </div>
+
+            <div className="threat-card">
+              <div className="threat-card-num">02</div>
+              <span className="threat-card-badge">THROWAWAY INFRASTRUCTURE</span>
+              <h3 className="threat-card-title">Newly Registered Domains</h3>
+              <p className="threat-card-desc">
+                Phishing campaigns stand up disposable domains hours before sending spear-phishing emails, evading static blocklists that take days to update.
+              </p>
+              <div className="threat-card-demo">
+                <span className="threat-demo-highlight">14 Days Active</span>
+                <span className="threat-demo-note">Fresh domain flagged for caution</span>
+              </div>
+            </div>
+
+            <div className="threat-card">
+              <div className="threat-card-num">03</div>
+              <span className="threat-card-badge">PAYLOAD OBFUSCATION</span>
+              <h3 className="threat-card-title">High Entropy &amp; Token Smuggling</h3>
+              <p className="threat-card-desc">
+                Deceptive query parameters conceal base64 payloads, victim tracking tokens, and multi-stage redirect targets inside long, randomized strings.
+              </p>
+              <div className="threat-card-demo">
+                <code>?token=<span className="text-suspicious">cGFzc3dvcm...</span></code>
+                <span className="threat-demo-note">Entropy: 4.88 bits/char</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 02: THE PHISHGUARD SOLUTION
+          ------------------------------------------------------------------ */}
+      <section className="section solution-editorial-section">
+        <div className="section-container">
+          <div className="solution-overview-box">
+            <div className="solution-copy">
+              <span className="editorial-eyebrow">DETERMINISTIC FORENSICS</span>
+              <h2 className="section-title">Look beyond the URL.</h2>
+              <p className="section-subtitle">
+                PhishGuard operates as a non-executing security analyzer. It evaluates every component of a web address using mathematical algorithms, registry telemetry, and character mapping.
+              </p>
+              <div className="solution-pills-row">
+                <span className="sol-pill">✓ Levenshtein Typosquatting</span>
+                <span className="sol-pill">✓ Unicode Homoglyph Audit</span>
+                <span className="sol-pill">✓ WHOIS / RDAP Domain Age</span>
+                <span className="sol-pill">✓ Shannon Entropy Scoring</span>
+                <span className="sol-pill">✓ Path Semantics &amp; Keywords</span>
+                <span className="sol-pill">✓ Transparent 0–100 Verdict</span>
+              </div>
+            </div>
+
+            <div className="solution-graphic-card">
+              <div className="sol-graphic-header">
+                <span className="sol-dot" />
+                <span className="sol-graphic-title">INSPECTION PIPELINE</span>
+              </div>
+              <div className="sol-pipeline-list">
+                <div className="pipeline-item">
+                  <span className="pipeline-step-idx">L1</span>
+                  <div className="pipeline-step-info">
+                    <strong>Lexical &amp; Script Parser</strong>
+                    <span>Decomposes hostname, checks Punycode &amp; non-ASCII Unicode code points.</span>
+                  </div>
+                </div>
+                <div className="pipeline-item">
+                  <span className="pipeline-step-idx">L2</span>
+                  <div className="pipeline-step-info">
+                    <strong>Algorithmic Entropy Engine</strong>
+                    <span>Computes Shannon entropy across hostname, URI path, and query tokens.</span>
+                  </div>
+                </div>
+                <div className="pipeline-item">
+                  <span className="pipeline-step-idx">L3</span>
+                  <div className="pipeline-step-info">
+                    <strong>Registry &amp; WHOIS Telemetry</strong>
+                    <span>Verifies domain birth dates, registrar profile, and DNS configuration.</span>
+                  </div>
+                </div>
+                <div className="pipeline-item highlight-item">
+                  <span className="pipeline-step-idx">L4</span>
+                  <div className="pipeline-step-info">
+                    <strong>Explainable Threat Scoring</strong>
+                    <span>Synthesizes all factors into an audited 0–100 score and verdict badge.</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Soft Animated Golden Transition with 3 Overlapping Glow Layers */}
+        <div
+          className="section-atmospheric-glow-transition"
+          style={{ '--scroll-glow-scale': scrollGlowScale } as React.CSSProperties}
+          aria-hidden="true"
+        >
+          <div className="glow-layer glow-layer-3" />
+          <div className="glow-layer glow-layer-2" />
+          <div className="glow-layer glow-layer-1" />
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 03: CAPABILITIES (6 ALTERNATING STORYTELLING ROWS)
+          ------------------------------------------------------------------ */}
+      <section
+        ref={capabilitiesSectionRef}
+        className={`section editorial-story-section ${capabilitiesInView ? 'capabilities-revealed' : 'capabilities-hidden'}`}
+      >
+        <div className="section-container">
+          <div className="section-intro capability-intro-reveal">
+            <span className="editorial-eyebrow capability-eyebrow-reveal">INSPECTION LAYERS &amp; TELEMETRY</span>
+            <h2 className="section-title capability-heading-reveal">Six layers of technical intelligence.</h2>
+            <p className="section-subtitle capability-desc-reveal">
+              Phishing links disguise their true intent behind clever domain tricks and encoded paths. PhishGuard exposes every layer.
+            </p>
+          </div>
+
+          <div className="story-rows-container">
+            {/* Row 1: Typosquatting */}
+            <div className="story-row">
+              <div className="story-content-col">
+                <span className="story-tag-pill">TYPOSQUATTING &amp; BRAND SPOOFING</span>
+                <h3 className="story-headline">Attackers don't invent new names. They misspell familiar ones.</h3>
+                <p className="story-copy">
+                  Typosquatting takes advantage of small typos, character insertions, or digit swaps (such as substituting "1" for "l" or "0" for "o"). PhishGuard tests domains against known corporate targets to uncover brand impersonation before you type your credentials.
+                </p>
+                <ul className="story-bullet-list">
+                  <li><span className="bullet-check">✓</span><span>Levenshtein edit-distance calculations</span></li>
+                  <li><span className="bullet-check">✓</span><span>Leet-speak &amp; numeric substitution detection</span></li>
+                  <li><span className="bullet-check">✓</span><span>Subdomain brand trickery verification</span></li>
+                </ul>
+              </div>
+              <div className="story-visual-col">
+                <div className="story-visual-card">
+                  <div className="visual-card-top">
+                    <span className="visual-dot" />
+                    <span className="visual-badge">Signal 01</span>
+                  </div>
+                  <div className="visual-mock mock-typo">
+                    <div className="mock-row spoofed">
+                      <span className="mock-label">Spoofed:</span>
+                      <code>secure-paypa1-login.com</code>
+                      <span className="mock-flag">⚠️ '1' used for 'l'</span>
+                    </div>
+                    <div className="mock-arrow">↓ Target Brand Comparison</div>
+                    <div className="mock-row legit">
+                      <span className="mock-label">Legitimate:</span>
+                      <code>paypal.com</code>
+                      <span className="mock-tag-clean">Official Origin</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 2: Homoglyphs (Reversed) */}
+            <div className="story-row story-reversed">
+              <div className="story-content-col">
+                <span className="story-tag-pill">HOMOGLYPH &amp; UNICODE AUDIT</span>
+                <h3 className="story-headline">One lookalike character can deceive the human eye.</h3>
+                <p className="story-copy">
+                  Internationalized Domain Names (IDNs) allow foreign alphabets in web addresses. Cybercriminals exploit this by swapping Latin letters for visually indistinguishable Cyrillic or Greek characters. PhishGuard checks the exact Unicode code points to detect hidden impostor domains.
+                </p>
+                <ul className="story-bullet-list">
+                  <li><span className="bullet-check">✓</span><span>Cyrillic &amp; Greek lookalike mapping</span></li>
+                  <li><span className="bullet-check">✓</span><span>Punycode (xn--) and ASCII decomposition</span></li>
+                  <li><span className="bullet-check">✓</span><span>Visual homoglyph alert generation</span></li>
+                </ul>
+              </div>
+              <div className="story-visual-col">
+                <div className="story-visual-card">
+                  <div className="visual-card-top">
+                    <span className="visual-dot" />
+                    <span className="visual-badge">Signal 02</span>
+                  </div>
+                  <div className="mock-char-compare">
+                    <div className="char-box fraud">
+                      <span className="char-display">googӏe.com</span>
+                      <span className="char-sub">Cyrillic Small Letter Palochka (U+04CF)</span>
+                    </div>
+                    <div className="char-vs">VS</div>
+                    <div className="char-box safe">
+                      <span className="char-display">google.com</span>
+                      <span className="char-sub">Latin Small Letter L (U+006C)</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 3: WHOIS / Domain Age */}
+            <div className="story-row">
+              <div className="story-content-col">
+                <span className="story-tag-pill">REGISTRY &amp; DOMAIN AGE</span>
+                <h3 className="story-headline">Newly registered domains demand additional caution.</h3>
+                <p className="story-copy">
+                  Malicious infrastructure is often stood up hours before a spear-phishing campaign launches. PhishGuard audits public WHOIS/RDAP signals, highlighting newly created domains (under 30 days) and evaluating registrar reputation without fabricating telemetry.
+                </p>
+                <ul className="story-bullet-list">
+                  <li><span className="bullet-check">✓</span><span>Domain creation &amp; expiration dates</span></li>
+                  <li><span className="bullet-check">✓</span><span>Public registrar organization telemetry</span></li>
+                  <li><span className="bullet-check">✓</span><span>Domain tenure risk factor weighting</span></li>
+                </ul>
+              </div>
+              <div className="story-visual-col">
+                <div className="story-visual-card">
+                  <div className="visual-card-top">
+                    <span className="visual-dot" />
+                    <span className="visual-badge">Signal 03</span>
+                  </div>
+                  <div className="visual-mock mock-whois">
+                    <div className="whois-metric-pill">
+                      <span className="whois-num">14</span>
+                      <span className="whois-unit">Days Old</span>
+                    </div>
+                    <div className="whois-alert-banner">
+                      <strong>Newly Registered Domain Signal</strong>
+                      <p>Created on 2026-09-16. Recent registrations warrant elevated caution.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 4: Shannon Entropy (Reversed) */}
+            <div className="story-row story-reversed">
+              <div className="story-content-col">
+                <span className="story-tag-pill">SHANNON ENTROPY AUDIT</span>
+                <h3 className="story-headline">Mathematical randomness uncovers hidden tokens.</h3>
+                <p className="story-copy">
+                  Natural domain names and clean paths follow linguistic frequency patterns. Phishing URLs with generated tokens, encoded hash strings, or base64 payloads exhibit high entropy (over 4.5 bits/character).
+                </p>
+                <ul className="story-bullet-list">
+                  <li><span className="bullet-check">✓</span><span>Bit-per-character lexical distribution</span></li>
+                  <li><span className="bullet-check">✓</span><span>Query parameter entropy calculation</span></li>
+                  <li><span className="bullet-check">✓</span><span>Automated token smuggling classification</span></li>
+                </ul>
+              </div>
+              <div className="story-visual-col">
+                <div className="story-visual-card">
+                  <div className="visual-card-top">
+                    <span className="visual-dot" />
+                    <span className="visual-badge">Signal 04</span>
+                  </div>
+                  <div className="entropy-visual-demo">
+                    <div className="entropy-demo-header">
+                      <span className="entropy-demo-val">4.92 <small>bits/char</small></span>
+                      <span className="entropy-demo-badge badge-suspiciously-high">Suspiciously High</span>
+                    </div>
+                    <div className="entropy-track">
+                      <div className="entropy-bar-fill" style={{ width: '82%' }} />
+                    </div>
+                    <div className="entropy-scale-labels">
+                      <span>0.0 Natural</span>
+                      <span>3.5 Normal</span>
+                      <span>4.5 Suspicious</span>
+                      <span>6.0+ Encrypted</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 5: Path & Query Forensics */}
+            <div className="story-row">
+              <div className="story-content-col">
+                <span className="story-tag-pill">URL PATH &amp; PARAMETER FORENSICS</span>
+                <h3 className="story-headline">Sensitive keyword paths reveal malicious intent.</h3>
+                <p className="story-copy">
+                  Phishing websites structure their paths to mimic authentication gates. PhishGuard highlights sensitive keywords like "/login", "/verify", "/update-billing", and flags URL-encoded obfuscations (%xx).
+                </p>
+                <ul className="story-bullet-list">
+                  <li><span className="bullet-check">✓</span><span>Keyword intent analysis (/auth, /wallet, /verify)</span></li>
+                  <li><span className="bullet-check">✓</span><span>Percent-encoded hex string decoding</span></li>
+                  <li><span className="bullet-check">✓</span><span>Suspicious parameter nesting detection</span></li>
+                </ul>
+              </div>
+              <div className="story-visual-col">
+                <div className="story-visual-card">
+                  <div className="visual-card-top">
+                    <span className="visual-dot" />
+                    <span className="visual-badge">Signal 05</span>
+                  </div>
+                  <div className="path-decomp-demo">
+                    <div className="decomp-row">
+                      <span className="decomp-label">Target URI:</span>
+                      <code>/portal/verify/session-auth</code>
+                    </div>
+                    <div className="decomp-chips-row">
+                      <span className="keyword-chip">verify</span>
+                      <span className="keyword-chip">session-auth</span>
+                      <span className="keyword-chip">portal</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 6: Explainable Threat Scoring (Reversed) */}
+            <div className="story-row story-reversed">
+              <div className="story-content-col">
+                <span className="story-tag-pill">EXPLAINABLE THREAT INDEX</span>
+                <h3 className="story-headline">Transparent scores backed by verifiable evidence.</h3>
+                <p className="story-copy">
+                  Instead of ambiguous warnings, PhishGuard outputs an explainable 0–100 Threat Index where each factor is clearly itemized: domain age, homoglyphs, typosquatting, entropy, and sensitive keywords.
+                </p>
+                <ul className="story-bullet-list">
+                  <li><span className="bullet-check">✓</span><span>Weighted factor aggregation</span></li>
+                  <li><span className="bullet-check">✓</span><span>Deterministic Safe / Suspicious / Malicious verdicts</span></li>
+                  <li><span className="bullet-check">✓</span><span>Actionable takeaway guidance</span></li>
+                </ul>
+              </div>
+              <div className="story-visual-col">
+                <div className="story-visual-card">
+                  <div className="visual-card-top">
+                    <span className="visual-dot" />
+                    <span className="visual-badge">Signal 06</span>
+                  </div>
+                  <div className="threat-summary-demo">
+                    <div className="threat-verdict-pill-mini verdict-malicious">
+                      <span>MALICIOUS VERDICT (94/100)</span>
+                    </div>
+                    <div className="findings-bullet-list">
+                      <div className="finding-bullet-item severity-high">
+                        <span className="finding-bullet-index">01</span>
+                        <div className="finding-bullet-content">
+                          <strong className="finding-bullet-title">Typosquatting Detected</strong>
+                          <p className="finding-bullet-desc">Imitates PayPal with '1' substituted for 'l'.</p>
+                        </div>
+                      </div>
+                      <div className="finding-bullet-item severity-medium">
+                        <span className="finding-bullet-index">02</span>
+                        <div className="finding-bullet-content">
+                          <strong className="finding-bullet-title">High Query Entropy</strong>
+                          <p className="finding-bullet-desc">Entropy 4.92 indicates encoded session token.</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 04: CYBERSECURITY VISUAL / IMAGE CAROUSEL
+          ------------------------------------------------------------------ */}
+      <section className="section carousel-editorial-section">
+        <div className="section-container">
+          <div className="section-intro">
+            <span className="editorial-eyebrow">CYBERSECURITY CAROUSEL</span>
+            <h2 className="section-title">Know what you're looking for.</h2>
+            <p className="section-subtitle">
+              Understand the visual and technical indicators used to detect lookalike domains, obfuscated paths, and deceptive URLs.
+            </p>
+          </div>
+
+          <CybersecurityCarousel />
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 05: HOW PHISHGUARD WORKS (NUMBERED 01–04)
+          ------------------------------------------------------------------ */}
+      <section className="section process-editorial-section">
+        <div className="section-container">
+          <div className="section-intro">
+            <span className="editorial-eyebrow">THE INSPECTION PROCESS</span>
+            <h2 className="section-title">A security analysis flow without the noise.</h2>
+            <p className="section-subtitle">
+              PhishGuard moves from raw URL input to transparent evidence, turning complex cybersecurity telemetry into clear, actionable intelligence.
+            </p>
+          </div>
+
+          <div className="process-cards-row">
+            <div className="process-editorial-card">
+              <span className="process-step-number">01</span>
+              <div className="process-divider-dot" />
+              <h3 className="process-step-title">PASTE</h3>
+              <p className="process-step-desc">
+                Paste any suspicious link, message attachment URL, or lookalike domain into the safe inspector input.
+              </p>
+            </div>
+            <div className="process-editorial-card">
+              <span className="process-step-number">02</span>
+              <div className="process-divider-dot" />
+              <h3 className="process-step-title">INSPECT</h3>
+              <p className="process-step-desc">
+                PhishGuard decomposes the hostname, analyzes character scripts, computes Shannon entropy, and queries WHOIS registry signals.
+              </p>
+            </div>
+            <div className="process-editorial-card">
+              <span className="process-step-number">03</span>
+              <div className="process-divider-dot" />
+              <h3 className="process-step-title">ASSESS</h3>
+              <p className="process-step-desc">
+                All structural and registration signals are synthesized into an explainable 0–100 threat score and risk category.
+              </p>
+            </div>
+            <div className="process-editorial-card">
+              <span className="process-step-number">04</span>
+              <div className="process-divider-dot" />
+              <h3 className="process-step-title">UNDERSTAND</h3>
+              <p className="process-step-desc">
+                Review transparent findings detailing why the URL is flagged and receive actionable safety recommendations.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 06: DEEP URL INSPECTION (EXPLODED URL INTERACTIVE VISUAL)
+          ------------------------------------------------------------------ */}
+      <section className="section exploded-url-section">
+        <div className="section-container">
+          <div className="section-intro">
+            <span className="editorial-eyebrow">DEEP URL INSPECTION</span>
+            <h2 className="section-title">Every part of the URL tells a story.</h2>
+            <p className="section-subtitle">
+              Click through the individual anatomy segments below to see how PhishGuard evaluates each element of a web address.
+            </p>
+          </div>
+
+          <div className="exploded-inspector-card">
+            {/* Exploded Segment Bar */}
+            <div className="exploded-bar-container">
+              <button
+                type="button"
+                className={`exploded-segment-btn ${activeExplodedPart === 'protocol' ? 'active-segment' : ''}`}
+                onClick={() => setActiveExplodedPart('protocol')}
+              >
+                <span className="segment-sub">PROTOCOL</span>
+                <span className="segment-text">https://</span>
+              </button>
+              <button
+                type="button"
+                className={`exploded-segment-btn ${activeExplodedPart === 'subdomain' ? 'active-segment' : ''}`}
+                onClick={() => setActiveExplodedPart('subdomain')}
+              >
+                <span className="segment-sub">SUBDOMAIN</span>
+                <span className="segment-text">secure-login.</span>
+              </button>
+              <button
+                type="button"
+                className={`exploded-segment-btn ${activeExplodedPart === 'brand' ? 'active-segment' : ''}`}
+                onClick={() => setActiveExplodedPart('brand')}
+              >
+                <span className="segment-sub">SLD / BRAND</span>
+                <span className="segment-text text-malicious">paypa1</span>
+              </button>
+              <button
+                type="button"
+                className={`exploded-segment-btn ${activeExplodedPart === 'tld' ? 'active-segment' : ''}`}
+                onClick={() => setActiveExplodedPart('tld')}
+              >
+                <span className="segment-sub">TLD</span>
+                <span className="segment-text">.com</span>
+              </button>
+              <button
+                type="button"
+                className={`exploded-segment-btn ${activeExplodedPart === 'path' ? 'active-segment' : ''}`}
+                onClick={() => setActiveExplodedPart('path')}
+              >
+                <span className="segment-sub">PATH</span>
+                <span className="segment-text">/portal/session/verify</span>
+              </button>
+              <button
+                type="button"
+                className={`exploded-segment-btn ${activeExplodedPart === 'query' ? 'active-segment' : ''}`}
+                onClick={() => setActiveExplodedPart('query')}
+              >
+                <span className="segment-sub">QUERY</span>
+                <span className="segment-text">?token=cGFzc3...</span>
+              </button>
+            </div>
+
+            {/* Exploded Details Box */}
+            <div className="exploded-details-panel">
+              <div className="exploded-panel-header">
+                <div>
+                  <span className="exploded-badge">{explodedPartsData[activeExplodedPart].badge}</span>
+                  <h4 className="exploded-panel-title">{explodedPartsData[activeExplodedPart].label}</h4>
+                </div>
+                <code className="exploded-panel-code">{explodedPartsData[activeExplodedPart].snippet}</code>
+              </div>
+              <div className="exploded-status-strip">
+                <span className="status-label">Forensic Status:</span>
+                <strong>{explodedPartsData[activeExplodedPart].status}</strong>
+              </div>
+              <p className="exploded-panel-desc">{explodedPartsData[activeExplodedPart].desc}</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 07: DOMAIN INTELLIGENCE & REGISTRY AUDIT
+          ------------------------------------------------------------------ */}
+      <section className="section whois-showcase-section">
+        <div className="section-container">
+          <div className="section-intro">
+            <span className="editorial-eyebrow">DOMAIN INTELLIGENCE</span>
+            <h2 className="section-title">Know when a domain was born.</h2>
+            <p className="section-subtitle">
+              Spear-phishing campaigns frequently rely on disposable domains registered hours before launch. PhishGuard audits registry records to detect fresh infrastructure.
+            </p>
+          </div>
+
+          <div className="whois-cards-grid">
+            <div className="whois-showcase-card">
+              <div className="whois-showcase-header">
+                <span className="whois-card-tag">AGE TELEMETRY</span>
+                <span className="whois-card-num">01</span>
+              </div>
+              <h3 className="whois-card-title">Registration Lifecycle</h3>
+              <p className="whois-card-desc">
+                Tracking domain birth timestamps to calculate exact domain tenure. Domains under 30 days old are prioritized for heightened scrutiny.
+              </p>
+              <div className="whois-stat-box">
+                <span className="stat-big font-mono">&lt; 30 Days</span>
+                <span className="stat-label">Elevated Risk Window</span>
+              </div>
+            </div>
+
+            <div className="whois-showcase-card">
+              <div className="whois-showcase-header">
+                <span className="whois-card-tag">REGISTRAR VERIFICATION</span>
+                <span className="whois-card-num">02</span>
+              </div>
+              <h3 className="whois-card-title">Public Registry Profiling</h3>
+              <p className="whois-card-desc">
+                Auditing the sponsoring registrar, DNSSEC validation status, and registry locks without relying on synthetic data.
+              </p>
+              <div className="whois-stat-box">
+                <span className="stat-big font-mono">ICANN / RDAP</span>
+                <span className="stat-label">Standardized Public Query Protocol</span>
+              </div>
+            </div>
+
+            <div className="whois-showcase-card">
+              <div className="whois-showcase-header">
+                <span className="whois-card-tag">CORRELATION</span>
+                <span className="whois-card-num">03</span>
+              </div>
+              <h3 className="whois-card-title">Multi-Signal Risk Weighting</h3>
+              <p className="whois-card-desc">
+                A newly registered domain is not inherently malicious, but combined with typosquatting or sensitive keywords, it warrants an immediate alert.
+              </p>
+              <div className="whois-stat-box">
+                <span className="stat-big font-mono">+35 Pts</span>
+                <span className="stat-label">Threat Factor Contribution</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 08: EXPLAINABLE THREAT SCORE DEMO
+          ------------------------------------------------------------------ */}
+      <section className="section threat-demo-section">
+        <div className="section-container">
+          <div className="section-intro">
+            <span className="editorial-eyebrow">TRANSPARENT SCORING</span>
+            <h2 className="section-title">Turn signals into an explainable risk score.</h2>
+            <p className="section-subtitle">
+              No black boxes. PhishGuard maps every detected anomaly directly to the overall threat verdict. Try the live presets below:
+            </p>
+          </div>
+
+          <div className="threat-demo-container">
+            <div className="threat-demo-controls">
+              <button
+                type="button"
+                className={`demo-preset-btn ${demoGaugeVerdict === 'SAFE' ? 'active-preset safe' : ''}`}
+                onClick={() => setDemoGaugeVerdict('SAFE')}
+              >
+                <span>Safe Origin (0–20)</span>
+                <code>github.com</code>
+              </button>
+              <button
+                type="button"
+                className={`demo-preset-btn ${demoGaugeVerdict === 'SUSPICIOUS' ? 'active-preset suspicious' : ''}`}
+                onClick={() => setDemoGaugeVerdict('SUSPICIOUS')}
+              >
+                <span>Suspicious Link (21–60)</span>
+                <code>account-security-update.net</code>
+              </button>
+              <button
+                type="button"
+                className={`demo-preset-btn ${demoGaugeVerdict === 'MALICIOUS' ? 'active-preset malicious' : ''}`}
+                onClick={() => setDemoGaugeVerdict('MALICIOUS')}
+              >
+                <span>Malicious Phish (61–100)</span>
+                <code>secure-paypa1-verification.com</code>
+              </button>
+            </div>
+
+            <div className="threat-demo-display-card">
+              <div className="demo-card-left">
+                <div className="demo-verdict-header">
+                  <span className={`verdict-tag verdict-badge-${demoGaugeVerdict.toLowerCase()}`}>
+                    {demoGaugeVerdict} VERDICT
+                  </span>
+                  <span className="demo-score-chip font-mono">
+                    Score: {demoScores[demoGaugeVerdict].score}/100
+                  </span>
+                </div>
+                <h3 className="demo-target-url">
+                  <code>{demoScores[demoGaugeVerdict].title}</code>
+                </h3>
+                <p className="demo-target-desc">{demoScores[demoGaugeVerdict].desc}</p>
+              </div>
+
+              <div className="demo-card-right">
+                <ThreatScoreGauge
+                  score={demoScores[demoGaugeVerdict].score}
+                  verdict={demoScores[demoGaugeVerdict].verdict}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 09: EDUCATION ACADEMY
+          ------------------------------------------------------------------ */}
+      <section className="section education-editorial-section">
+        <div className="section-container">
+          <div className="section-intro">
+            <span className="editorial-eyebrow">KNOWLEDGE &amp; PRECAUTION</span>
+            <h2 className="section-title">Technical evidence made easy to understand.</h2>
+            <p className="section-subtitle">
+              PhishGuard translates deep cybersecurity metrics into accessible concepts, empowering every user to recognize deceptive links.
+            </p>
+          </div>
+
+          <div className="education-cards-grid">
+            <article className="edu-card edu-card-dark">
+              <div className="edu-card-header">
+                <span className="edu-tag">TYPOSQUATTING</span>
+                <span className="edu-idx">01</span>
+              </div>
+              <h3 className="edu-title">A familiar name can hide a completely different domain.</h3>
+              <p className="edu-body">Attackers register domains that closely resemble legitimate services by inserting hyphens, repeating letters, or substituting numbers for vowels.</p>
+              <div className="edu-tip-box">
+                <span className="edu-tip-label">SAFETY TAKEAWAY:</span>
+                <p className="edu-tip-text">Check the domain name character by character before entering passwords.</p>
+              </div>
+            </article>
+
+            <article className="edu-card edu-card-light">
+              <div className="edu-card-header">
+                <span className="edu-tag">HOMOGLYPHS</span>
+                <span className="edu-idx">02</span>
+              </div>
+              <h3 className="edu-title">Some non-Latin characters look identical on screen.</h3>
+              <p className="edu-body">Unicode characters from other writing systems (like Cyrillic or Greek) can look identical to Latin letters in modern browsers.</p>
+              <div className="edu-tip-box">
+                <span className="edu-tip-label">SAFETY TAKEAWAY:</span>
+                <p className="edu-tip-text">Inspect the raw Punycode or verify the domain origin in PhishGuard.</p>
+              </div>
+            </article>
+
+            <article className="edu-card edu-card-light">
+              <div className="edu-card-header">
+                <span className="edu-tag">URL ENTROPY</span>
+                <span className="edu-idx">03</span>
+              </div>
+              <h3 className="edu-title">Entropy measures the mathematical randomness of text.</h3>
+              <p className="edu-body">High entropy in URL parameters often points to session harvesting tokens, base64 payload strings, or obfuscated redirect endpoints.</p>
+              <div className="edu-tip-box">
+                <span className="edu-tip-label">SAFETY TAKEAWAY:</span>
+                <p className="edu-tip-text">Be wary of unusually long, chaotic URL parameter strings in unsolicited messages.</p>
+              </div>
+            </article>
+
+            <article className="edu-card edu-card-dark">
+              <div className="edu-card-header">
+                <span className="edu-tag">DOMAIN AGE</span>
+                <span className="edu-idx">04</span>
+              </div>
+              <h3 className="edu-title">Recently registered infrastructure deserves extra scrutiny.</h3>
+              <p className="edu-body">Attackers create throwaway domains right before launching phishing blasts. A domain under 30 days old is a notable risk indicator.</p>
+              <div className="edu-tip-box">
+                <span className="edu-tip-label">SAFETY TAKEAWAY:</span>
+                <p className="edu-tip-text">Always verify important notifications directly on the provider's official portal.</p>
+              </div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 10: SAFE INSPECTION SANDBOX GUARANTEE
+          ------------------------------------------------------------------ */}
+      <section className="section safe-guarantee-section">
+        <div className="section-container">
+          <div className="guarantee-hero-card">
+            <div className="guarantee-left-col">
+              <span className="editorial-eyebrow">SAFE INSPECTION GUARANTEE</span>
+              <h2 className="guarantee-heading">Inspect without opening the destination.</h2>
+              <p className="guarantee-desc">
+                Traditional link verification tools accidentally trigger drive-by downloads or payload tracking beacons. PhishGuard uses a strict zero-execution model.
+              </p>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={scrollToScanner}
+              >
+                <span>Inspect Suspicious Link</span>
+                <ArrowUpRight />
+              </button>
+            </div>
+
+            <div className="guarantee-right-col">
+              <div className="guarantee-pill-item">
+                <div className="guarantee-pill-icon">🛡️</div>
+                <div className="guarantee-pill-text">
+                  <strong>Zero Client-Side Execution</strong>
+                  <span>Destination HTML, JavaScript, and iframes are never downloaded or executed on your machine.</span>
+                </div>
+              </div>
+              <div className="guarantee-pill-item">
+                <div className="guarantee-pill-icon">🔒</div>
+                <div className="guarantee-pill-text">
+                  <strong>Local Syntactic Parsing</strong>
+                  <span>Lexical decomposition and Shannon entropy are calculated securely in-session.</span>
+                </div>
+              </div>
+              <div className="guarantee-pill-item">
+                <div className="guarantee-pill-icon">🌐</div>
+                <div className="guarantee-pill-text">
+                  <strong>Deterministic Threat Output</strong>
+                  <span>Verdicts are derived from transparent evidence, not opaque predictive approximations.</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 11: CYBERSECURITY FORENSIC INSIGHTS
+          ------------------------------------------------------------------ */}
+      <section className="section insights-editorial-section">
+        <div className="section-container">
+          <div className="section-intro">
+            <span className="editorial-eyebrow">FORENSIC FIELD NOTES</span>
+            <h2 className="section-title">Real-world attack patterns analyzed by PhishGuard.</h2>
+            <p className="section-subtitle">
+              Case studies on deceptive mechanisms observed across recent spear-phishing and credential harvesting campaigns.
+            </p>
+          </div>
+
+          <div className="insights-cards-grid">
+            <div className="insight-card">
+              <div className="insight-top">
+                <span className="insight-tag">CASE STUDY 01</span>
+                <span className="insight-date font-mono">FINANCIAL SERVICES</span>
+              </div>
+              <h3 className="insight-title">The Subdomain Brand Illusion</h3>
+              <p className="insight-desc">
+                Attackers registered <code>paypal.com.account-verify-portal.net</code>. Mobile browsers truncated the address bar to show only "paypal.com", concealing the true malicious root domain.
+              </p>
+              <div className="insight-footer-badge">
+                <span>Signal: Subdomain Brand Trickery</span>
+              </div>
+            </div>
+
+            <div className="insight-card">
+              <div className="insight-top">
+                <span className="insight-tag">CASE STUDY 02</span>
+                <span className="insight-date font-mono">EXECUTIVE SPOOFING</span>
+              </div>
+              <h3 className="insight-title">Homoglyphic CEO Impersonation</h3>
+              <p className="insight-desc">
+                A spear-phishing link used the Cyrillic 'о' (U+043E) in an internal portal URL. The visual difference was 0 pixels in standard sans-serif rendering engines.
+              </p>
+              <div className="insight-footer-badge">
+                <span>Signal: Non-ASCII IDN Detected</span>
+              </div>
+            </div>
+
+            <div className="insight-card">
+              <div className="insight-top">
+                <span className="insight-tag">CASE STUDY 03</span>
+                <span className="insight-date font-mono">OAUTH INTERCEPTION</span>
+              </div>
+              <h3 className="insight-title">Entropy-Driven Token Smuggling</h3>
+              <p className="insight-desc">
+                High-entropy query parameters concealed base64 session identifiers, funneling targets through multi-hop redirect gateways without human detection.
+              </p>
+              <div className="insight-footer-badge">
+                <span>Signal: High Parameter Entropy</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 12: INTERACTIVE FAQ ACCORDION
+          ------------------------------------------------------------------ */}
+      <section className="section faq-editorial-section">
+        <div className="section-container">
+          <div className="section-intro">
+            <span className="editorial-eyebrow">FREQUENTLY ASKED QUESTIONS</span>
+            <h2 className="section-title">Everything you need to know about PhishGuard.</h2>
+            <p className="section-subtitle">
+              Common questions about URL forensics, non-executing sandboxes, homoglyph detection, and threat calculation.
+            </p>
+          </div>
+
+          <div className="accordion-wrapper">
+            {faqItems.map((item, idx) => {
+              const isOpen = openFaqIndex === idx
+              return (
+                <div key={idx} className={`accordion-item ${isOpen ? 'accordion-open' : ''}`}>
+                  <button
+                    type="button"
+                    className="accordion-trigger"
+                    onClick={() => setOpenFaqIndex(isOpen ? null : idx)}
+                    aria-expanded={isOpen}
+                  >
+                    <span className="accordion-question">{item.q}</span>
+                    <span className="accordion-icon">{isOpen ? '−' : '+'}</span>
+                  </button>
+                  {isOpen && (
+                    <div className="accordion-content">
+                      <p>{item.a}</p>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------------------------------
+          SECTION 13: FINAL CTA BANNER (Automark Style)
+          ------------------------------------------------------------------ */}
+      <section className="section final-cta-section">
+        <div className="section-container">
+          <div className="page-bottom-cta-banner automark-final-banner">
+            <div className="page-bottom-cta-content">
+              <span className="editorial-eyebrow text-accent-gold">START PROTECTING YOURSELF</span>
+              <h2 className="page-bottom-cta-title">Before you trust the link, inspect it.</h2>
+              <p className="page-bottom-cta-desc">
+                Paste any suspicious link, email CTA, SMS shortlink, or lookalike domain to run real-time forensics without executing browser scripts.
+              </p>
+            </div>
+            <div className="final-cta-btn-group">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={scrollToScanner}
+              >
+                <span>Launch URL Inspector</span>
+                <ArrowUpRight />
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary btn-inverted"
+                onClick={() => onNavigate('blog')}
+              >
+                <span>Explore Security Blog</span>
+              </button>
             </div>
           </div>
         </div>
@@ -983,27 +2497,27 @@ function AnalysisPage({
   analysisResult,
   analysisError,
   onStartInspection,
-  onCompleteScan,
   onResetScan,
 }: {
   activeUrl: string | null
   analysisState: ScanState
   analysisResult: AnalysisDetails | null
-  analysisError: string | null
+  analysisError?: string | null
   onStartInspection: (url: string) => void
-  onCompleteScan: (url: string) => void
   onResetScan: () => void
 }) {
   const [activeStepIndex, setActiveStepIndex] = useState(0)
   const [scanProgress, setScanProgress] = useState(0)
 
+  // The scanning sequence is visual only. The actual request is started
+  // immediately by the parent when the user clicks "Inspect URL".
   useEffect(() => {
     if (analysisState !== 'scanning' || !activeUrl) return
 
     setActiveStepIndex(0)
-    setScanProgress(0)
+    setScanProgress(5)
 
-    const stepInterval = 300
+    const stepInterval = 260
     const totalSteps = SCAN_STEPS.length
     let currentStep = 0
 
@@ -1011,34 +2525,30 @@ function AnalysisPage({
       currentStep++
       if (currentStep < totalSteps) {
         setActiveStepIndex(currentStep)
-        setScanProgress(Math.round((currentStep / totalSteps) * 100))
+        setScanProgress(Math.min(95, Math.round((currentStep / totalSteps) * 100)))
       } else {
         clearInterval(timer)
-        setActiveStepIndex(totalSteps - 1)
-        setScanProgress(100)
-        onCompleteScan(activeUrl)
+        setScanProgress(95)
       }
     }, stepInterval)
 
     return () => clearInterval(timer)
   }, [analysisState, activeUrl])
 
-  const renderList = (items: string[], empty = 'Unavailable') => (
-    items.length ? items.map((item, index) => <code key={`${item}-${index}`} className="intel-chip">{item}</code>) : <span className="intel-muted">{empty}</span>
-  )
-
   return (
     <div className="page-view analysis-page-view">
       <section className="section analysis-hub-section">
         <div className="section-container">
+          {/* Header */}
           <div className="section-intro reveal-stagger-1">
             <span className="editorial-eyebrow">ANALYSIS &amp; THREAT INTELLIGENCE</span>
             <h2 className="section-title">Security intelligence for the URL you're inspecting.</h2>
             <p className="section-subtitle">
-              The browser parses URL structure locally; the FastAPI enrichment service adds live RDAP, DNS, IP geolocation, and OSINT intelligence. The destination URL is never opened by PhishGuard.
+              Deterministic analysis across character encoding, domain reputation, lexical entropy, and URL semantics.
             </p>
           </div>
 
+          {/* Reused Live URL Inspector Card at the Top of Analysis */}
           <div className="analysis-inspector-wrapper reveal-stagger-2">
             <UrlInspectorCard
               initialUrl={activeUrl || ''}
@@ -1047,25 +2557,39 @@ function AnalysisPage({
             />
           </div>
 
+          {/* STATE 1: SCANNING PROGRESS STATE */}
           {analysisState === 'scanning' && activeUrl && (
             <div className="analysis-live-scanning-card reveal-stagger-2" aria-live="polite">
               <div className="scanning-card-header">
-                <div className="scanning-pulse-box reveal-stagger-3"><SearchPulseIcon /></div>
+                <div className="scanning-pulse-box reveal-stagger-3">
+                  <SearchPulseIcon />
+                </div>
                 <div className="scanning-header-titles reveal-stagger-2">
                   <span className="scanning-status-pill">LIVE INSPECTION IN PROGRESS</span>
-                  <h3 className="scanning-target-url"><code>{activeUrl}</code></h3>
+                  <h3 className="scanning-target-url">
+                    <code>{activeUrl}</code>
+                  </h3>
                 </div>
                 <div className="scanning-pct-badge">{scanProgress}%</div>
               </div>
-              <div className="progress-track-bar"><div className="progress-fill-bar" style={{ width: `${scanProgress}%` }} /></div>
+
+              <div className="progress-track-bar">
+                <div className="progress-fill-bar" style={{ width: `${scanProgress}%` }} />
+              </div>
+
               <div className="sequence-steps-grid reveal-stagger-4">
                 {SCAN_STEPS.map((step, idx) => {
                   const isDone = idx < activeStepIndex
                   const isCurrent = idx === activeStepIndex
                   return (
                     <div key={step.id} className={`step-item ${isDone ? 'step-done' : ''} ${isCurrent ? 'step-active' : ''}`}>
-                      <div className="step-num-badge">{isDone ? '✓' : step.id}</div>
-                      <div className="step-text-wrap"><span className="step-name">{step.name}</span><span className="step-desc">{step.desc}</span></div>
+                      <div className="step-num-badge">
+                        {isDone ? '✓' : step.id}
+                      </div>
+                      <div className="step-text-wrap">
+                        <span className="step-name">{step.name}</span>
+                        <span className="step-desc">{step.desc}</span>
+                      </div>
                     </div>
                   )
                 })}
@@ -1073,221 +2597,445 @@ function AnalysisPage({
             </div>
           )}
 
+          {/* STATE 2: STANDBY (NO URL ENTERED / AWAITING SCAN) */}
           {analysisState === 'idle' && !analysisResult && (
             <div className="analysis-empty-compact-card reveal-stagger-2">
               <div className="empty-compact-content">
-                <div className="empty-compact-badge-row"><span className="empty-status-dot" /><span className="empty-compact-pill">STANDBY MODE</span></div>
+                <div className="empty-compact-badge-row">
+                  <span className="empty-status-dot" />
+                  <span className="empty-compact-pill">STANDBY MODE</span>
+                </div>
                 <h3 className="empty-compact-title">No URL inspected yet.</h3>
-                <p className="empty-compact-desc">Enter a URL above. The report will only show values returned by the live analysis service; unavailable sources are clearly marked.</p>
+                <p className="empty-compact-desc">
+                  Your URL intelligence report will appear here. Enter a URL in the Scanner to begin real-time analysis.
+                </p>
               </div>
-              <div className="empty-compact-action"><button type="button" className="btn btn-primary btn-sm" onClick={onResetScan}><span>Go to Scanner</span><ArrowUpRight /></button></div>
+              <div className="empty-compact-action">
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={onResetScan}
+                >
+                  <span>Go to Scanner</span>
+                  <ArrowUpRight />
+                </button>
+              </div>
             </div>
           )}
 
+          {/* STATE 4: BACKEND / API FAILURE STATE */}
           {analysisState === 'error' && (
-            <div className="analysis-error-card reveal-stagger-2" role="alert">
-              <div>
-                <span className="editorial-eyebrow">ANALYSIS SERVICE UNAVAILABLE</span>
-                <h3 className="empty-compact-title">The URL was not enriched with live intelligence.</h3>
-                <p className="empty-compact-desc">{analysisError || 'The backend analysis service returned an unexpected error.'}</p>
-                <p className="intel-muted">Local URL parsing remains safe; connect the FastAPI backend and try again. No static WHOIS, IP, or OSINT values are substituted.</p>
+            <div className="analysis-empty-compact-card reveal-stagger-2" style={{ borderColor: 'rgba(239, 68, 68, 0.4)', background: 'rgba(239, 68, 68, 0.03)' }} role="alert">
+              <div className="empty-compact-content" style={{ padding: '28px 24px' }}>
+                <div className="empty-compact-badge-row">
+                  <span className="empty-status-dot" style={{ backgroundColor: 'var(--threat-malicious)' }} />
+                  <span className="empty-compact-pill" style={{ color: 'var(--threat-malicious)', borderColor: 'rgba(239, 68, 68, 0.3)' }}>BACKEND SERVICE ERROR</span>
+                </div>
+                <h3 className="empty-compact-title" style={{ color: 'var(--text-primary)', marginTop: 8 }}>
+                  Threat Intelligence Backend Unavailable
+                </h3>
+                <p className="empty-compact-desc" style={{ color: 'var(--text-secondary)', marginTop: 6, maxWidth: '640px' }}>
+                  {analysisError || 'Real-time analysis could not be completed. Please ensure the backend server is running and try again.'}
+                </p>
+                <div style={{ marginTop: 18, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={() => activeUrl && onStartInspection(activeUrl)}
+                  >
+                    <span>Retry Analysis</span>
+                    <ArrowUpRight />
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    onClick={onResetScan}
+                  >
+                    <span>← Scan Another URL</span>
+                  </button>
+                </div>
               </div>
-              <button type="button" className="btn btn-primary btn-sm" onClick={() => activeUrl && onStartInspection(activeUrl)}>Retry analysis <ArrowUpRight /></button>
             </div>
           )}
 
+          {/* STATE 3: COMPLETED THREAT ANALYSIS REPORT */}
           {analysisState === 'completed' && analysisResult && (
             <div className="active-analysis-report-wrapper">
+              {/* Action Toolbar */}
               <div className="analysis-report-toolbar">
-                <div className="report-source-status">
-                  <span className="status-indicator-dot" />
-                  <span>LIVE DATA REPORT · {analysisResult.backendSource}</span>
-                </div>
-                <button type="button" className="btn btn-primary btn-sm" onClick={onResetScan}><span>← Scan Another URL</span></button>
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  onClick={onResetScan}
+                >
+                  <span>← Scan Another URL</span>
+                </button>
               </div>
 
+              {/* Primary Verdict Banner */}
               <div className={`verdict-hero-card verdict-${analysisResult.verdict.toLowerCase()} reveal-stagger-1`}>
                 <div className="verdict-card-left">
                   <div className="verdict-badge-row">
-                    <span className="verdict-tag">{analysisResult.verdict} VERDICT</span>
-                    <span className="verdict-score-pill">Threat Index: {analysisResult.threatScore}/100</span>
+                    <span className="verdict-tag">{analysisResult.verdict === 'UNREACHABLE' ? 'WEBSITE NOT FOUND' : `${analysisResult.verdict} VERDICT`}</span>
+                    {typeof analysisResult.threatScore === 'number' && (
+                      <span className="verdict-score-pill">Threat Index: {analysisResult.threatScore}/100</span>
+                    )}
+                    {analysisResult.confidence && (
+                      <span className="verdict-score-pill" style={{ opacity: 0.9 }}>
+                        Confidence: {String(analysisResult.confidence).toUpperCase()}
+                      </span>
+                    )}
                   </div>
-                  <h3 className="scanned-url-heading"><code>{analysisResult.url}</code></h3>
-                  <p className="verdict-summary-text">
-                    This assessment is derived from the URL's observed structure plus the external enrichment returned at scan time. It is an indicator, not proof that a destination is safe or malicious.
-                  </p>
-                  <div className="url-telemetry-meta">
-                    <div className="telemetry-item"><span className="telemetry-label">Hostname:</span><code className="telemetry-value">{analysisResult.hostname}</code></div>
-                    <div className="telemetry-item"><span className="telemetry-label">Protocol:</span><code className="telemetry-value">{analysisResult.protocol} ({analysisResult.structure.isHttps ? 'HTTPS' : 'HTTP'})</code></div>
-                    <div className="telemetry-item"><span className="telemetry-label">Resolved IP:</span><code className="telemetry-value">{analysisResult.resolution.primaryIp || 'Unavailable'}</code></div>
-                    <div className="telemetry-item"><span className="telemetry-label">Generated:</span><span className="telemetry-value">{new Date(analysisResult.generatedAt).toLocaleString()}</span></div>
-                  </div>
-                </div>
-                <div className="verdict-card-right"><ThreatScoreGauge score={analysisResult.threatScore} verdict={analysisResult.verdict} /></div>
-              </div>
-
-              {/* URL parts: intentionally mirrors the decomposition shown in the supplied reference image. */}
-              <article className="analysis-card url-parts-card reveal-stagger-2">
-                <div className="card-top-bar"><span className="card-num">01</span><span className="card-category">URL DECOMPOSITION</span></div>
-                <h4 className="card-title">Every structural part, parsed from the raw input.</h4>
-                <div className="url-breakdown-string" aria-label="Parsed URL parts">
-                  <span className="url-part-token token-scheme">{analysisResult.urlParts.scheme}://</span>
-                  <span className="url-part-token token-subdomain">{analysisResult.urlParts.subdomain === '—' ? '' : `${analysisResult.urlParts.subdomain}.`}</span>
-                  <span className="url-part-token token-domain">{analysisResult.urlParts.domain}</span>
-                  <span className="url-part-token token-tld">{analysisResult.urlParts.tld}</span>
-                  <span className="url-part-token token-port">{analysisResult.port ? `:${analysisResult.port}` : ''}</span>
-                  <span className="url-part-token token-path">{analysisResult.path}</span>
-                  {analysisResult.urlParts.querySeparator !== '—' && <span className="url-part-token token-query-separator">?</span>}
-                  {analysisResult.urlParts.queryString !== '—' && <span className="url-part-token token-query">{analysisResult.urlParts.queryString}</span>}
-                  {analysisResult.fragment && <span className="url-part-token token-fragment">#{analysisResult.fragment}</span>}
-                </div>
-                <div className="url-parts-label-grid">
-                  {[
-                    ['Scheme', analysisResult.urlParts.scheme],
-                    ['Subdomain', analysisResult.urlParts.subdomain],
-                    ['Domain', analysisResult.urlParts.domain],
-                    ['Top Level Domain', analysisResult.urlParts.tld],
-                    ['Port Number', analysisResult.urlParts.port],
-                    ['Path', analysisResult.urlParts.path],
-                    ['Query String', analysisResult.urlParts.queryString],
-                    ['Query Parameters', `${analysisResult.queryParams.length} parsed`],
-                    ['Fragment', analysisResult.urlParts.fragment],
-                  ].map(([label, value]) => (
-                    <div key={label} className="url-part-field"><span className="data-key">{label}</span><code className="data-val">{value || '—'}</code></div>
-                  ))}
-                </div>
-              </article>
-
-              <div className="intel-grid-2">
-                <article className="analysis-card reveal-stagger-2">
-                  <div className="card-top-bar"><span className="card-num">02</span><span className="card-category">WHOIS / RDAP</span></div>
-                  <h4 className="card-title">Live registration intelligence.</h4>
-                  {analysisResult.whois.error ? <p className="intel-error">{analysisResult.whois.error}</p> : (
-                    <div className="card-data-table">
-                      <div className="data-row"><span className="data-key">Domain</span><code className="data-val">{analysisResult.whois.domain || 'Unavailable'}</code></div>
-                      <div className="data-row"><span className="data-key">Registrar</span><span className="data-val">{analysisResult.whois.registrar || 'Not disclosed'}</span></div>
-                      <div className="data-row"><span className="data-key">Creation Date</span><code className="data-val">{analysisResult.whois.creationDate || 'Not returned'}</code></div>
-                      <div className="data-row"><span className="data-key">Expiration Date</span><code className="data-val">{analysisResult.whois.expirationDate || 'Not returned'}</code></div>
-                      <div className="data-row"><span className="data-key">Domain Age</span><span className={`data-val font-semibold ${analysisResult.whois.isNewlyRegistered ? 'highlight-warning' : ''}`}>{analysisResult.whois.domainAgeFormatted}</span></div>
-                      <div className="data-row"><span className="data-key">Status</span><span className="data-val text-xs font-mono">{analysisResult.whois.status.length ? analysisResult.whois.status.join(', ') : 'Not returned'}</span></div>
-                      <div className="data-row"><span className="data-key">DNSSEC</span><span className="data-val">{analysisResult.whois.dnssec || 'Not returned'}</span></div>
-                      <div className="data-row"><span className="data-key">Nameservers</span><span className="data-val">{analysisResult.whois.nameservers.length ? analysisResult.whois.nameservers.join(', ') : 'Not returned'}</span></div>
+                  <h3 className="scanned-url-heading" title={analysisResult.url}>
+                    <code>{analysisResult.maskedUrl}</code>
+                  </h3>
+                  <p className="verdict-summary-text">{analysisResult.summary}</p>
+                  {analysisResult.domainStatus && (
+                    <div className={`domain-status-banner dstate-${analysisResult.domainStatus.state}`} role="status">
+                      <span className="dsb-icon" aria-hidden="true">
+                        {analysisResult.domainStatus.state === 'live' || analysisResult.domainStatus.state === 'ip_host' ? '✓'
+                          : analysisResult.domainStatus.state === 'unknown' ? '?' : '✕'}
+                      </span>
+                      <div className="dsb-body">
+                        <strong>{analysisResult.domainStatus.title}</strong>
+                        <p>{analysisResult.domainStatus.detail}</p>
+                        {analysisResult.domainStatus.evidence.length > 0 && analysisResult.domainStatus.state !== 'live' && (
+                          <span className="dsb-evidence">{analysisResult.domainStatus.evidence.join('  ·  ')}</span>
+                        )}
+                      </div>
                     </div>
                   )}
-                  <p className="card-narrative">Source: {analysisResult.whois.source}. Registration privacy can limit registrar/owner fields.</p>
-                </article>
-
-                <article className="analysis-card reveal-stagger-2">
-                  <div className="card-top-bar"><span className="card-num">03</span><span className="card-category">IP &amp; GEOLOCATION</span></div>
-                  <h4 className="card-title">Where the hostname resolves.</h4>
-                  <div className="card-data-table">
-                    <div className="data-row"><span className="data-key">Resolved IPv4/IPv6</span><span className="data-val">{renderList(analysisResult.resolution.ips)}</span></div>
-                    <div className="data-row"><span className="data-key">Primary IP</span><code className="data-val">{analysisResult.ipIntel.ip || analysisResult.resolution.primaryIp || 'Unavailable'}</code></div>
-                    <div className="data-row"><span className="data-key">Location</span><span className="data-val">{[analysisResult.ipIntel.city, analysisResult.ipIntel.region, analysisResult.ipIntel.country].filter(Boolean).join(', ') || 'Unavailable'}</span></div>
-                    <div className="data-row"><span className="data-key">Coordinates</span><span className="data-val">{analysisResult.ipIntel.latitude != null && analysisResult.ipIntel.longitude != null ? `${analysisResult.ipIntel.latitude}, ${analysisResult.ipIntel.longitude}` : 'Unavailable'}</span></div>
-                    <div className="data-row"><span className="data-key">ASN</span><span className="data-val">{analysisResult.ipIntel.asn || 'Unavailable'}</span></div>
-                    <div className="data-row"><span className="data-key">Organization</span><span className="data-val">{analysisResult.ipIntel.org || 'Unavailable'}</span></div>
-                    <div className="data-row"><span className="data-key">Timezone</span><span className="data-val">{analysisResult.ipIntel.timezone || 'Unavailable'}</span></div>
+                  <div className="url-telemetry-meta">
+                    <div className="telemetry-item">
+                      <span className="telemetry-label">Hostname:</span>
+                      <code className="telemetry-value">{analysisResult.hostname}</code>
+                    </div>
+                    <div className="telemetry-item">
+                      <span className="telemetry-label">Protocol:</span>
+                      <code className="telemetry-value">{analysisResult.protocol} ({analysisResult.structure.isHttps ? 'Encrypted' : 'Unencrypted'})</code>
+                    </div>
+                    <div className="telemetry-item">
+                      <span className="telemetry-label">Domain Age:</span>
+                      <span className="telemetry-value">{analysisResult.whois.domainAgeFormatted}</span>
+                    </div>
                   </div>
-                  <p className="card-narrative">Source: {analysisResult.ipIntel.source || 'No geolocation source returned'}.</p>
-                </article>
+                </div>
+
+                <div className="verdict-card-right">
+                  <ThreatScoreGauge score={analysisResult.threatScore} verdict={analysisResult.verdict} />
+                </div>
               </div>
 
-              <article className="analysis-card osint-card reveal-stagger-2">
-                <div className="card-top-bar"><span className="card-num">04</span><span className="card-category">OSINT LOOKUP</span></div>
-                <h4 className="card-title">Passive pivots and public intelligence.</h4>
-                <div className="osint-section-grid">
-                  <div className="osint-block"><span className="intel-block-label">Known Subdomains</span><div className="intel-chip-wrap">{renderList(analysisResult.osint.subdomains, 'No results returned')}</div></div>
-                  <div className="osint-block"><span className="intel-block-label">Reverse-IP Domains</span><div className="intel-chip-wrap">{renderList(analysisResult.osint.reverseIpDomains, 'No results returned')}</div></div>
-                  <div className="osint-block"><span className="intel-block-label">Public URLscan Sightings</span><div className="intel-chip-wrap">{analysisResult.osint.urlscanSightings.length ? analysisResult.osint.urlscanSightings.map((s, i) => <span key={`${s.uuid}-${i}`} className="intel-sighting">{s.taskTime || 'Observed'} · {s.ip || s.country || 'public scan'}</span>) : <span className="intel-muted">No public sightings returned</span>}</div></div>
-                  <div className="osint-block"><span className="intel-block-label">DNS Records</span><div className="dns-mini-grid"><span>A: {analysisResult.dns.A.length}</span><span>AAAA: {analysisResult.dns.AAAA.length}</span><span>MX: {analysisResult.dns.MX.length}</span><span>NS: {analysisResult.dns.NS.length}</span><span>TXT: {analysisResult.dns.TXT.length}</span><span>CNAME: {analysisResult.dns.CNAME.length}</span></div></div>
-                </div>
-                {(analysisResult.osint.notes.length || analysisResult.osint.sources.length) ? <p className="card-narrative">{analysisResult.osint.notes.join(' ')} {analysisResult.osint.sources.length ? `Sources: ${analysisResult.osint.sources.join(', ')}.` : ''}</p> : <p className="card-narrative">No OSINT source returned additional notes for this scan.</p>}
-              </article>
-
+              {/* 6 Analysis Deep-Dive Cards */}
               <div className="cards-grid-6">
+                {/* Card 1: OSINT Snapshot */}
                 <article className="analysis-card stagger-card-1">
-                  <div className="card-top-bar"><span className="card-num">05</span><span className="card-category">TYPOSQUATTING CHECK</span></div>
-                  <h4 className="card-title">Lookalike domain detection.</h4>
-                  <div className="card-data-table">
-                    <div className="data-row"><span className="data-key">Target Brand</span><span className="data-val font-semibold">{analysisResult.typosquatting.targetBrand || 'None identified'}</span></div>
-                    <div className="data-row"><span className="data-key">Pattern</span><span className="data-val">{analysisResult.typosquatting.patternType || 'No pattern'}</span></div>
-                    <div className="data-row"><span className="data-key">Similarity</span><span className="data-val font-mono">{analysisResult.typosquatting.similarityScore != null ? `${analysisResult.typosquatting.similarityScore}%` : 'Not calculated'}</span></div>
+                  <div className="card-top-bar">
+                    <span className="card-num">01</span>
+                    <span className="card-category">OSINT SNAPSHOT</span>
                   </div>
-                  <p className="card-narrative">{analysisResult.typosquatting.explanation}</p>
+                  <h4 className="card-title">Open-Source Intelligence</h4>
+                  <div className="card-data-table">
+                    <div className="data-row">
+                      <span className="data-key">Hostname</span>
+                      <code className="data-val">{analysisResult.osint.hostname}</code>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Domain</span>
+                      <code className="data-val">{analysisResult.osint.domain}</code>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Protocol</span>
+                      <span className="data-val font-mono">{analysisResult.osint.scheme.toUpperCase()}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">DNS Status</span>
+                      <span className={`data-val font-semibold ${analysisResult.osint.dnsStatus === 'resolved' ? 'text-safe' : 'highlight-warning'}`}>
+                        {analysisResult.osint.dnsStatus.replace(/_/g, ' ')}
+                      </span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Resolved IPs</span>
+                      <span className="data-val text-xs font-mono">
+                        {analysisResult.osint.resolvedIps.length ? analysisResult.osint.resolvedIps.slice(0, 3).join(', ') : 'None returned'}
+                      </span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Domain State</span>
+                      <span className="data-val">{analysisResult.osint.domainState || 'Unknown'}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Query Parameters</span>
+                      <span className="data-val">{analysisResult.osint.queryParameterCount}</span>
+                    </div>
+                  </div>
+                  <p className="card-narrative">Compact OSINT evidence collected from the URL, DNS resolution, and domain-state checks. Detailed registration and IP intelligence are shown in the dedicated cards below.</p>
                 </article>
 
+                {/* Card 2: Typosquatting */}
                 <article className="analysis-card stagger-card-2">
-                  <div className="card-top-bar"><span className="card-num">06</span><span className="card-category">HOMOGLYPH AUDIT</span></div>
-                  <h4 className="card-title">Unicode &amp; character spoofing.</h4>
+                  <div className="card-top-bar">
+                    <span className="card-num">02</span>
+                    <span className="card-category">TYPOSQUATTING CHECK</span>
+                  </div>
+                  <h4 className="card-title">Lookalike Domain Detection</h4>
                   <div className="card-data-table">
-                    <div className="data-row"><span className="data-key">Status</span><span className={`data-val font-semibold ${analysisResult.homoglyphs.detected ? 'text-malicious' : 'text-safe'}`}>{analysisResult.homoglyphs.detected ? 'Deceptive characters found' : 'No non-ASCII hostname chars'}</span></div>
-                    {analysisResult.homoglyphs.characters.map((c, i) => <div key={i} className="data-row"><span className="data-key">Character #{i + 1}</span><span className="data-val"><code className="char-badge">{c.char}</code> {c.codePoint} → '{c.lookalike}' ({c.script})</span></div>)}
+                    <div className="data-row">
+                      <span className="data-key">Target Brand</span>
+                      <span className={`data-val font-semibold ${analysisResult.typosquatting.detected ? 'text-malicious' : analysisResult.typosquatting.isOfficialDomain ? 'text-safe' : ''}`}>
+                        {analysisResult.typosquatting.targetBrand
+                          || (analysisResult.typosquatting.isOfficialDomain ? `${analysisResult.typosquatting.officialBrand} (official domain)` : 'None Identified')}
+                      </span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Imitation Pattern</span>
+                      <span className="data-val">{analysisResult.typosquatting.patternType || 'Standard Syntax'}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Similarity Index</span>
+                      <span className="data-val font-mono">
+                        {analysisResult.typosquatting.detected
+                          ? `${analysisResult.typosquatting.similarityScore}% Match`
+                          : analysisResult.typosquatting.isOfficialDomain ? 'Exact official match' : '0% (no match)'}
+                      </span>
+                    </div>
+                    {analysisResult.typosquatting.detected && analysisResult.typosquatting.officialDomain && (
+                      <div className="data-row">
+                        <span className="data-key">Legitimate Domain</span>
+                        <code className="data-val">{analysisResult.typosquatting.officialDomain}</code>
+                      </div>
+                    )}
+                    {analysisResult.typosquatting.detected && analysisResult.typosquatting.confidence && (
+                      <div className="data-row">
+                        <span className="data-key">Confidence</span>
+                        <span className="data-val" style={{ textTransform: 'capitalize' }}>{analysisResult.typosquatting.confidence}</span>
+                      </div>
+                    )}
+                  </div>
+                  <p className="card-narrative">{analysisResult.typosquatting.explanation}</p>
+                  {analysisResult.typosquatting.detected && (
+                    <div className="badge-flag flag-critical">
+                      <span>Spoofed Brand Target: <strong>{analysisResult.typosquatting.targetBrand}</strong></span>
+                    </div>
+                  )}
+                </article>
+
+                {/* Card 3: Homoglyph Inspection */}
+                <article className="analysis-card stagger-card-3">
+                  <div className="card-top-bar">
+                    <span className="card-num">03</span>
+                    <span className="card-category">HOMOGLYPH AUDIT</span>
+                  </div>
+                  <h4 className="card-title">Unicode &amp; Character Spoofs</h4>
+                  <div className="card-data-table">
+                    <div className="data-row">
+                      <span className="data-key">Homoglyph Status</span>
+                      <span className={`data-val font-semibold ${analysisResult.homoglyphs.detected ? 'text-malicious' : 'text-safe'}`}>
+                        {analysisResult.homoglyphs.detected ? 'Deceptive Characters Found' : 'Clean (Pure ASCII)'}
+                      </span>
+                    </div>
+                    {analysisResult.homoglyphs.characters.map((c, i) => (
+                      <div key={i} className="data-row homoglyph-row">
+                        <span className="data-key">Character #{i + 1}</span>
+                        <span className="data-val">
+                          <code className="char-badge">{c.char}</code> ({c.codePoint}) mimics Latin <code className="char-badge">'{c.lookalike}'</code>
+                        </span>
+                      </div>
+                    ))}
                   </div>
                   <p className="card-narrative">{analysisResult.homoglyphs.explanation}</p>
                 </article>
 
-                <article className="analysis-card stagger-card-3">
-                  <div className="card-top-bar"><span className="card-num">07</span><span className="card-category">URL STRUCTURE</span></div>
-                  <h4 className="card-title">Path &amp; query semantics.</h4>
+                {/* Card 4: URL Structure & Path */}
+                <article className="analysis-card stagger-card-4">
+                  <div className="card-top-bar">
+                    <span className="card-num">04</span>
+                    <span className="card-category">URL STRUCTURE</span>
+                  </div>
+                  <h4 className="card-title">Path &amp; Parameter Semantics</h4>
                   <div className="card-data-table">
-                    <div className="data-row"><span className="data-key">Path</span><code className="data-val">{analysisResult.path || '/'}</code></div>
-                    <div className="data-row"><span className="data-key">Port</span><code className="data-val">{analysisResult.port || 'Default'}</code></div>
-                    <div className="data-row"><span className="data-key">Suspicious Keywords</span><span className="data-val">{analysisResult.structure.suspiciousKeywords.length ? analysisResult.structure.suspiciousKeywords.map(k => <code key={k} className="keyword-chip">{k}</code>) : 'None'}</span></div>
-                    <div className="data-row"><span className="data-key">Encoded Bytes</span><span className="data-val">{analysisResult.structure.hasEncodedChars ? 'Detected (%xx)' : 'None'}</span></div>
-                    <div className="data-row"><span className="data-key">Query Parameters</span><span className="data-val">{analysisResult.queryParams.length}</span></div>
+                    <div className="data-row">
+                      <span className="data-key">Path</span>
+                      <code className="data-val text-xs break-all">{analysisResult.path || '/'}</code>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Suspicious Keywords</span>
+                      <span className="data-val">
+                        {analysisResult.structure.suspiciousKeywords.length > 0 ? (
+                          analysisResult.structure.suspiciousKeywords.map(k => <code key={k} className="keyword-chip">{k}</code>)
+                        ) : (
+                          <span className="text-safe">✓ None found</span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Encoded Bytes</span>
+                      <span className="data-val text-xs font-mono break-all">
+                        {analysisResult.structure.hasEncodedChars
+                          ? (analysisResult.structure.encodedSegments && analysisResult.structure.encodedSegments.length > 0
+                              ? analysisResult.structure.encodedSegments.slice(0, 3).map(e => `${e.raw} → ${JSON.stringify(e.decoded)}`).join('  ')
+                              : 'Detected (%xx encoding)')
+                          : <span className="text-safe">✓ None detected</span>}
+                        {analysisResult.structure.doubleEncoded ? '  (double-encoded)' : ''}
+                      </span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Query Parameters</span>
+                      <span className="data-val">{analysisResult.queryParams.length > 0 ? `${analysisResult.queryParams.length} parameter(s)` : <span className="text-safe">✓ None detected</span>}</span>
+                    </div>
+                    {analysisResult.queryParams.slice(0, 4).map(q => (
+                      <div key={q.key} className="data-row">
+                        <span className="data-key font-mono text-xs">{q.key}{q.isSensitive ? ' ⚠' : ''}</span>
+                        <code className="data-val text-xs break-all">{q.isSensitive ? q.maskedValue : (q.decoded ? `${q.value.slice(0, 24)}… → ${q.decoded.slice(0, 48)}` : q.value.slice(0, 64))}</code>
+                      </div>
+                    ))}
+                    {analysisResult.structure.hasUserInfo && (
+                      <div className="data-row">
+                        <span className="data-key">Embedded Login (@)</span>
+                        <span className="data-val text-malicious font-semibold">Detected — host spoofing trick</span>
+                      </div>
+                    )}
+                    {analysisResult.structure.redirectTargets && analysisResult.structure.redirectTargets.length > 0 && (
+                      <div className="data-row">
+                        <span className="data-key">Redirect Target</span>
+                        <code className={`data-val text-xs break-all ${analysisResult.structure.redirectTargets[0].crossDomain ? 'text-malicious' : ''}`}>{analysisResult.structure.redirectTargets[0].host}</code>
+                      </div>
+                    )}
+                    {typeof analysisResult.structure.subdomainDepth === 'number' && analysisResult.structure.subdomainDepth >= 3 && (
+                      <div className="data-row">
+                        <span className="data-key">Subdomain Depth</span>
+                        <span className="data-val text-malicious">{analysisResult.structure.subdomainDepth} levels (unusually deep)</span>
+                      </div>
+                    )}
+                    {(analysisResult.structure.hasOpaquePath || analysisResult.structure.hasRedirectParameter || analysisResult.structure.isTrackingOrRedirectService || analysisResult.structure.isUrlShortener) && (
+                      <div className="data-row">
+                        <span className="data-key">Redirect / Tracking</span>
+                        <span className="data-val">
+                          {analysisResult.structure.isTrackingOrRedirectService ? 'Tracking service' : analysisResult.structure.isUrlShortener ? 'URL shortener' : analysisResult.structure.hasRedirectParameter ? 'Redirect parameter' : 'Opaque path token'}
+                        </span>
+                      </div>
+                    )}
                   </div>
                   <p className="card-narrative">{analysisResult.structure.explanation}</p>
                 </article>
 
-                <article className="analysis-card stagger-card-4">
-                  <div className="card-top-bar"><span className="card-num">08</span><span className="card-category">QUERY PARAMETER AUDIT</span></div>
-                  <h4 className="card-title">Key/value pairs from the query string.</h4>
-                  <div className="query-audit-table">
-                    {analysisResult.queryParams.length ? analysisResult.queryParams.map((param, index) => <div key={`${param.key}-${index}`} className={`query-audit-row ${param.isSensitive ? 'query-sensitive' : ''}`}><code>{param.key}</code><span>=</span><code className="query-value">{param.value || '(empty)'}</code>{param.isSensitive && <span className="query-sensitive-badge">SENSITIVE KEY</span>}</div>) : <span className="intel-muted">No query parameters present.</span>}
-                  </div>
-                </article>
-
+                {/* Card 5: WHOIS / RDAP */}
                 <article className="analysis-card stagger-card-5">
-                  <div className="card-top-bar"><span className="card-num">09</span><span className="card-category">ENTROPY ANALYSIS</span></div>
-                  <h4 className="card-title">Algorithmic randomness.</h4>
-                  <div className="entropy-meter-wrap">
-                    <div className="entropy-val-header"><span className="entropy-number">{analysisResult.entropy.urlEntropy} <small>bits/char</small></span><span className={`entropy-badge badge-${analysisResult.entropy.level.toLowerCase().replace(' ', '-')}`}>{analysisResult.entropy.level}</span></div>
-                    <div className="entropy-track"><div className="entropy-bar-fill" style={{ width: `${Math.min(100, (analysisResult.entropy.urlEntropy / 6.0) * 100)}%` }} /></div>
-                    <div className="entropy-scale-labels"><span>0.0</span><span>3.5</span><span>4.5</span><span>6.0+</span></div>
+                  <div className="card-top-bar">
+                    <span className="card-num">05</span>
+                    <span className="card-category">WHOIS / RDAP</span>
                   </div>
-                  <p className="card-narrative">{analysisResult.entropy.explanation}</p>
+                  <h4 className="card-title">Registration Intelligence</h4>
+                  <div className="card-data-table">
+                    <div className="data-row">
+                      <span className="data-key">Domain</span>
+                      <code className="data-val">{analysisResult.whois.domain}</code>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Registrar</span>
+                      <span className={`data-val ${isMissing(analysisResult.whois.registrar) ? 'data-val-muted' : ''}`}>{analysisResult.whois.registrar}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Registered</span>
+                      <span className="data-val font-mono">{analysisResult.whois.creationDate}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Domain Age</span>
+                      <span className={`data-val font-semibold ${analysisResult.whois.isNewlyRegistered ? 'highlight-warning' : ''}`}>{analysisResult.whois.domainAgeFormatted}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Registry Status</span>
+                      <span className="data-val text-xs font-mono">{analysisResult.whois.status}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Expires</span>
+                      <span className="data-val font-mono">{analysisResult.whois.expirationDate || 'Not published'}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Nameservers</span>
+                      <span className="data-val text-xs font-mono">{analysisResult.whois.nameservers?.length ? analysisResult.whois.nameservers.slice(0, 2).join(', ') : 'Not published'}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Data Source</span>
+                      <span className="data-val text-xs font-mono">{analysisResult.whois.source || 'RDAP'}</span>
+                    </div>
+                  </div>
+                  {analysisResult.whois.lookupNote && <p className="card-narrative">{analysisResult.whois.lookupNote}</p>}
                 </article>
 
+                {/* Card 6: IP Intelligence */}
                 <article className="analysis-card stagger-card-6">
-                  <div className="card-top-bar"><span className="card-num">10</span><span className="card-category">THREAT INTELLIGENCE</span></div>
-                  <h4 className="card-title">External reputation signals.</h4>
-                  <div className="card-data-table">
-                    <div className="data-row"><span className="data-key">URLhaus</span><span className="data-val">{analysisResult.osint.urlhaus?.listed == null ? 'Not configured / unavailable' : analysisResult.osint.urlhaus.listed ? 'Listed' : 'Not listed'}</span></div>
-                    <div className="data-row"><span className="data-key">PhishTank</span><span className="data-val">{analysisResult.osint.phishtank?.inDatabase == null ? 'Not configured / unavailable' : analysisResult.osint.phishtank.inDatabase ? 'Found in database' : 'Not found'}</span></div>
-                    <div className="data-row"><span className="data-key">VirusTotal</span><span className="data-val">{analysisResult.osint.virustotal?.malicious == null ? 'Not configured / unavailable' : `${analysisResult.osint.virustotal.malicious} malicious / ${analysisResult.osint.virustotal.suspicious} suspicious`}</span></div>
-                    <div className="data-row"><span className="data-key">AbuseIPDB</span><span className="data-val">{analysisResult.osint.abuseIpdb?.confidenceScore == null ? 'Not configured / unavailable' : `${analysisResult.osint.abuseIpdb.confidenceScore}% confidence`}</span></div>
+                  <div className="card-top-bar">
+                    <span className="card-num">06</span>
+                    <span className="card-category">IP INTELLIGENCE</span>
                   </div>
-                  <p className="card-narrative">Optional providers are only queried when their API keys are configured in the backend. No placeholder reputation values are generated.</p>
+                  <h4 className="card-title">Network &amp; Geolocation</h4>
+                  <div className="card-data-table">
+                    <div className="data-row">
+                      <span className="data-key">Lookup Status</span>
+                      <span className={`data-val font-semibold ${analysisResult.intelligence?.ipIntelligence?.ip ? 'text-safe' : 'data-val-muted'}`}>{analysisResult.intelligence?.ipIntelligence?.ip ? 'Enriched' : 'No public IP data'}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">IP Address</span>
+                      <code className="data-val">{analysisResult.intelligence?.ipIntelligence?.ip || 'Not available'}</code>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Location</span>
+                      <span className="data-val">{[analysisResult.intelligence?.ipIntelligence?.geolocation?.city, analysisResult.intelligence?.ipIntelligence?.geolocation?.region, analysisResult.intelligence?.ipIntelligence?.geolocation?.country].filter(Boolean).join(', ') || 'Not available'}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">ASN</span>
+                      <span className="data-val font-mono">{analysisResult.intelligence?.ipIntelligence?.geolocation?.asn || 'Not available'}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Organization</span>
+                      <span className="data-val">{analysisResult.intelligence?.ipIntelligence?.geolocation?.org || 'Not available'}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Coordinates</span>
+                      <span className="data-val font-mono">{analysisResult.intelligence?.ipIntelligence?.geolocation?.latitude != null && analysisResult.intelligence?.ipIntelligence?.geolocation?.longitude != null ? `${analysisResult.intelligence.ipIntelligence.geolocation.latitude}, ${analysisResult.intelligence.ipIntelligence.geolocation.longitude}` : 'Not available'}</span>
+                    </div>
+                    <div className="data-row">
+                      <span className="data-key">Public IPs</span>
+                      <span className="data-val">{analysisResult.osint.resolvedIps.length}</span>
+                    </div>
+                  </div>
+                  <p className="card-narrative">Network-level intelligence returned by the backend. Geolocation is approximate and should not be treated as a physical address.</p>
+                </article>
+
+                {/* Card 7: Threat Reasoning */}
+                <article className="analysis-card stagger-card-7">
+                  <div className="card-top-bar">
+                    <span className="card-num">07</span>
+                    <span className="card-category">THREAT REASONING</span>
+                  </div>
+                  <h4 className="card-title">Score Contributing Factors</h4>
+                  <div className="findings-bullet-list">
+                    {analysisResult.reasons.map((item, idx) => (
+                      <div key={idx} className={`finding-bullet-item severity-${item.severity}`}>
+                        <span className="finding-bullet-index">{String(idx + 1).padStart(2, '0')}</span>
+                        <div className="finding-bullet-content">
+                          <strong className="finding-bullet-title">{item.title || (item as any).name}</strong>
+                          <p className="finding-bullet-desc">{item.detail}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </article>
               </div>
-
-              <article className="analysis-card threat-reasoning-card">
-                <div className="card-top-bar"><span className="card-num">11</span><span className="card-category">THREAT REASONING</span></div>
-                <h4 className="card-title">Score contributing factors.</h4>
-                <div className="findings-bullet-list">
-                  {analysisResult.reasons.map((item, idx) => <div key={idx} className={`finding-bullet-item severity-${item.severity}`}><span className="finding-bullet-index">{String(idx + 1).padStart(2, '0')}</span><div className="finding-bullet-content"><strong className="finding-bullet-title">{item.title}</strong><p className="finding-bullet-desc">{item.detail}</p></div></div>)}
-                </div>
-              </article>
             </div>
           )}
 
+          {/* Persistent Cybersecurity Educational Carousel */}
           <div className="analysis-carousel-section-wrap">
             <div className="carousel-section-header">
               <span className="editorial-eyebrow">CYBERSECURITY CAROUSEL</span>
               <h3 className="carousel-main-heading">Know what you're looking for.</h3>
-              <p className="carousel-main-desc">Understand the visual and technical indicators used to detect lookalike domains, obfuscated paths, and deceptive URLs.</p>
+              <p className="carousel-main-desc">
+                Understand the visual and technical indicators used to detect lookalike domains, obfuscated paths, and deceptive URLs.
+              </p>
             </div>
+
             <CybersecurityCarousel />
           </div>
         </div>
@@ -1297,55 +3045,384 @@ function AnalysisPage({
 }
 
 // --------------------------------------------------------------------------
-// PAGE 3: HOW IT WORKS (/how-it-works)
+// PAGE 3: BLOG (/blog)
 // --------------------------------------------------------------------------
-function HowItWorksPage({ onNavigate }: { onNavigate: (route: PageRoute) => void }) {
-  const steps = [
+interface BlogArticle {
+  id: string
+  tag: string
+  category: 'all' | 'attack_vectors' | 'url_forensics' | 'threat_intel' | 'engine' | 'defense' | 'evasion'
+  categoryLabel: string
+  title: string
+  readTime: string
+  badge: string
+  summary: string
+  sections: Array<{
+    heading: string
+    content: string
+  }>
+  keyTakeaways: string[]
+}
+
+function BlogPage({ onNavigate }: { onNavigate: (route: PageRoute) => void }) {
+  const [activeCategory, setActiveCategory] = useState<string>('all')
+  const [selectedArticle, setSelectedArticle] = useState<BlogArticle | null>(null)
+
+  const articles: BlogArticle[] = [
     {
-      num: '01',
-      title: 'PASTE',
-      desc: 'Paste any suspicious link, message attachment URL, or lookalike domain into the safe inspector input.',
+      id: 'how-phishing-attacks-work',
+      tag: 'ATTACK VECTORS & LIFECYCLE',
+      category: 'attack_vectors',
+      categoryLabel: 'Attack Vectors',
+      title: 'The Anatomy of a Modern Phishing Campaign: From Deceptive Lures to Credential Harvesting',
+      readTime: '5 min read',
+      badge: 'Fundamentals',
+      summary: 'Understanding how attackers craft deceptive pretexts, deploy lookalike landing pages, bypass multi-factor authentication with Adversary-in-the-Middle (AitM) proxies, and exfiltrate user credentials.',
+      sections: [
+        {
+          heading: '1. Reconnaissance & Target Pretexting',
+          content: 'Modern phishing campaigns rarely rely on generic spam. Attackers research organizations via LinkedIn, public DNS records, and vendor relationships to construct believable pretexts. Pretexts frequently mimic urgent notifications: IT password resets, shared document alerts, payroll updates, or critical security incidents that drive victims to act impulsively.'
+        },
+        {
+          heading: '2. Infrastructure Staging & Lookalike Domains',
+          content: 'Threat actors register deceptive domain names that imitate known organizations using character substitutions, hyphenation (e.g., login-microsoft-auth.com), or abuse free cloud hosting providers. Infrastructure is often stood up only hours before the campaign begins to evade reputation blocklists.'
+        },
+        {
+          heading: '3. Adversary-in-the-Middle (AitM) Reverse Proxies',
+          content: 'Advanced phishing frameworks (such as Evilginx and Modlishka) act as transparent reverse proxies. When the victim enters their username, password, and MFA code, the proxy forwards the credentials to the legitimate identity provider in real time, capturing session tokens and bypassing traditional SMS or OTP multi-factor authentication.'
+        },
+        {
+          heading: '4. Post-Exploitation & Lateral Movement',
+          content: 'Once an active session cookie or credential pair is captured, automated scripts immediately probe corporate APIs, set up mailbox forwarding rules, search OneDrive/SharePoint for sensitive credentials, and launch secondary internal spear-phishing attacks against colleagues.'
+        }
+      ],
+      keyTakeaways: [
+        'Urgent pretexts are engineered to bypass critical thinking and provoke hasty clicks.',
+        'MFA using SMS or push notifications can be intercepted by modern reverse proxy phishing kits.',
+        'FIDO2/WebAuthn hardware keys provide cryptographic origin binding that prevents AitM proxy bypasses.'
+      ]
     },
     {
-      num: '02',
-      title: 'INSPECT',
-      desc: 'PhishGuard decomposes the hostname, analyzes character scripts, computes Shannon entropy, and queries WHOIS registry signals.',
+      id: 'how-to-identify-suspicious-urls',
+      tag: 'URL FORENSICS & ANALYSIS',
+      category: 'url_forensics',
+      categoryLabel: 'URL Forensics',
+      title: 'How to Dissect and Identify Suspicious URLs: A Step-by-Step Security Guide',
+      readTime: '6 min read',
+      badge: 'Detection Guide',
+      summary: 'A hands-on methodology for inspecting hostnames, identifying deceptive subdomains, detecting character substitutions, and spotting obfuscated query strings without executing malware.',
+      sections: [
+        {
+          heading: '1. Isolate the Apex Domain from Subdomains',
+          content: 'Attackers routinely create nested subdomains to deceive victims who only glance at the beginning of a URL. For example, in the URL "https://paypal.com.account-verification-service.xyz/login", the apex domain is "account-verification-service.xyz", while "paypal.com" is merely a deceptive subdomain string. Always read the domain hierarchy backwards from the first single forward slash.'
+        },
+        {
+          heading: '2. Check for Internationalized Domain Names (IDN) & Homoglyphs',
+          content: 'Internationalized domain names permit Unicode characters in hostnames. Deceptive actors substitute Latin letters with visually indistinguishable Cyrillic or Greek glyphs (e.g. Cyrillic "а" U+0430 for Latin "a" U+0061). In browsers, these are encoded as Punycode starting with "xn--". Any URL displaying unexpected Punycode prefixes should be treated with extreme caution.'
+        },
+        {
+          heading: '3. Analyze Shannon Entropy and Character Randomness',
+          content: 'Legitimate web paths typically follow structured, human-readable directory conventions. Malicious URLs frequently feature high mathematical entropy strings (e.g., long pseudo-random alphanumeric hash paths) designed to route victims to transient session endpoints or hide malware signatures from basic regex scrapers.'
+        },
+        {
+          heading: '4. Verify Destination Ports and Protocol Anomalies',
+          content: 'Standard web traffic operates over port 443 (HTTPS) or port 80 (HTTP). If a URL contains explicit non-standard ports (such as :8080, :8443, :2083, or :10000), it often indicates an unmanaged staging server, compromised personal device, or hosting control panel being abused for credential harvesting.'
+        }
+      ],
+      keyTakeaways: [
+        'The apex domain is determined by reading backwards from the first single path slash.',
+        'Punycode hostnames (starting with xn--) often conceal foreign homoglyphs designed to mimic familiar brands.',
+        'Inspect URLs syntactically before clicking; never assume the presence of an SSL lock icon guarantees destination safety.'
+      ]
     },
     {
-      num: '03',
-      title: 'ASSESS',
-      desc: 'All structural and registration signals are synthesized into an explainable 0–100 threat score and risk category.',
+      id: 'understanding-domain-and-url-threat-intelligence',
+      tag: 'THREAT INTELLIGENCE',
+      category: 'threat_intel',
+      categoryLabel: 'Threat Intelligence',
+      title: 'Understanding Domain & URL Threat Intelligence: RDAP, WHOIS, and Reputation Signals',
+      readTime: '7 min read',
+      badge: 'Architecture',
+      summary: 'How security engines query authoritative registries, compute domain age, analyze autonomous system numbers (ASNs), and evaluate reputation feeds to determine deterministic risk scores.',
+      sections: [
+        {
+          heading: '1. RDAP & WHOIS Registry Timelines',
+          content: 'The Registration Data Access Protocol (RDAP) provides structured JSON telemetry regarding a domain registration. One of the highest weighted indicators in URL analysis is domain age: newly registered domains (NRDs created within the last 14 to 30 days) account for a disproportionate percentage of active phishing infrastructure.'
+        },
+        {
+          heading: '2. Autonomous System Numbers (ASN) & Hosting Profiles',
+          content: 'Every IP address belongs to an Autonomous System (AS) managed by an internet service provider, cloud host, or colocation center. Threat intelligence systems correlate hosting ASNs with historical abuse rates. High-risk bulletproof hosters and ephemeral cloud proxies score higher risk compared to verified enterprise content networks.'
+        },
+        {
+          heading: '3. DNS Record Validation & Email Authentication',
+          content: 'Evaluating DNS record sets (A, AAAA, MX, TXT, NS) reveals the operational maturity of a domain. Missing MX records on a domain claiming to belong to a global corporate entity or name servers hosted on dynamic DNS providers serve as strong heuristic indicators of disposable infrastructure.'
+        },
+        {
+          heading: '4. Synthesizing Multi-Source Signals Deterministically',
+          content: 'Rather than relying on opaque black-box outputs, explainable threat intelligence models aggregate individual risk vectors (lexical entropy, domain age, typosquatting edit distance, blocklist telemetry) into an auditable threat score accompanied by transparent evidential findings.'
+        }
+      ],
+      keyTakeaways: [
+        'Domain registration age is one of the most reliable single signals in threat detection.',
+        'RDAP modernizes WHOIS by providing standardized, machine-readable registry telemetry.',
+        'Explainable security requires clear evidence trails rather than unverified categorical labels.'
+      ]
     },
     {
-      num: '04',
-      title: 'UNDERSTAND',
-      desc: 'Review transparent findings detailing why the URL is flagged and receive actionable safety recommendations.',
+      id: 'why-threat-intel-providers-return-no-data',
+      tag: 'ENGINE EXPLAINER',
+      category: 'engine',
+      categoryLabel: 'Engine Explainer',
+      title: 'Why Threat Intelligence Feeds Sometimes Return No Detections on Malicious URLs',
+      readTime: '4 min read',
+      badge: 'Deep Dive',
+      summary: 'Explaining telemetry blindspots: zero-hour spear-phishing domains, unindexed private infrastructure, rate limits, and why multi-signal local heuristics remain essential.',
+      sections: [
+        {
+          heading: '1. The Zero-Hour Telemetry Gap',
+          content: 'Security blocklists and threat intelligence feeds (such as VirusTotal, URLhaus, and ThreatFox) rely on community submissions, honeypot traps, and web crawler discovery. When an adversary registers a new domain and delivers a targeted spear-phishing email within 15 minutes, no global crawler has yet discovered or indexed that URL. Absence of evidence is not evidence of absence.'
+        },
+        {
+          heading: '2. Geofencing, Bot Filtering & Sandbox Cloaking',
+          content: 'Modern phishing kits incorporate sophisticated server-side evasion. When security crawlers or sandbox scanners request the URL, the server checks the visitor IP address, ASN, and user-agent string. If the request originates from a known cloud data center (e.g. AWS, GCP, Microsoft Azure), the server returns a harmless 404 error or redirects to google.com, while serving the phishing kit exclusively to residential IP targets.'
+        },
+        {
+          heading: '3. One-Time Tokenized Links (Burner URLs)',
+          content: 'Phishing campaigns increasingly send unique per-victim token parameters. Once the victim loads the page (or if a security gateway crawls it once), the token is permanently invalidated. Subsequent visits by security analysts see an expired page, preventing provider consensus.'
+        },
+        {
+          heading: '4. The Necessity of Multi-Layered Heuristic Analysis',
+          content: 'Because external feeds cannot catch zero-hour campaigns instantly, deterministic local checks—such as Shannon entropy, typosquatting Levenshtein distance, Punycode detection, and RDAP registration age—are vital to protect users before community feeds update.'
+        }
+      ],
+      keyTakeaways: [
+        'A "0 detections" result on an external threat feed does not guarantee that a URL is safe.',
+        'Attackers use server-side bot-cloaking to hide malicious pages from security crawler IP ranges.',
+        'Local syntactic and domain-age analysis catches new phishing infrastructure before community lists update.'
+      ]
     },
+    {
+      id: 'safe-browsing-link-verification-playbook',
+      tag: 'DEFENSE PLAYBOOK',
+      category: 'defense',
+      categoryLabel: 'Defensive Guides',
+      title: 'The Safe Browsing Playbook: Essential Link Verification Habits for Everyday Security',
+      readTime: '5 min read',
+      badge: 'Best Practices',
+      summary: 'Actionable security hygiene guidelines to protect your credentials and endpoints when encountering unsolicited communications across email, SMS, and messaging platforms.',
+      sections: [
+        {
+          heading: '1. Adopt the "Out-of-Band Navigation" Habit',
+          content: 'When receiving an urgent notification (such as a banking security alert, account lock notice, or shipping update), never click the embedded link inside the message. Instead, open a new browser tab and navigate to the provider official website directly through a verified bookmark or clean search.'
+        },
+        {
+          heading: '2. Utilize Non-Executing Inspection Sandboxes',
+          content: 'If you must evaluate a link, use a non-executing parser like PhishGuard rather than opening it directly. Sandboxes decompose the hostname, inspect registry data, and verify redirects without executing malicious JavaScript or delivering browser exploit payloads to your workstation.'
+        },
+        {
+          heading: '3. Rely on Password Manager Domain-Bound Autofill',
+          content: 'Password managers (such as 1Password, Bitwarden, or browser-native keychains) authenticate against the exact registered domain name in the address bar. If you visit "paypal.login-verify.com", your password manager will refuse to autofill your stored "paypal.com" credentials, providing an immediate automatic warning.'
+        },
+        {
+          heading: '4. Treat Shortened Links and Redirects with Suspicion',
+          content: 'URL shorteners (e.g., bit.ly, tinyurl.com) obscure the final destination. Always expand shortened links or inspect the full redirect chain before providing credentials or authorizing OAuth permissions.'
+        }
+      ],
+      keyTakeaways: [
+        'Direct navigation via known bookmarks eliminates 95% of phishing link vulnerabilities.',
+        'Password managers provide hardware-level domain matching that will not autofill on spoofed domains.',
+        'Use dedicated metadata parsers to audit links without downloading remote scripts.'
+      ]
+    },
+    {
+      id: 'common-phishing-techniques-and-evasion',
+      tag: 'EVASION TACTICS',
+      category: 'evasion',
+      categoryLabel: 'Evasion Tactics',
+      title: 'Modern Phishing Tactics: Reverse Proxies, Cloud Hosting Abuse, and Quishing',
+      readTime: '8 min read',
+      badge: 'Emerging Threats',
+      summary: 'A deep dive into modern attacker evasion methods, including reverse proxy toolkits, QR code lures, and abusing trusted cloud platforms to bypass email security gateways.',
+      sections: [
+        {
+          heading: '1. QR Code Phishing ("Quishing")',
+          content: 'By embedding malicious URLs inside QR code images rather than plain text, attackers successfully bypass traditional Secure Email Gateways (SEGs) that inspect plaintext and HTML links. The victim scans the QR code on their mobile device, which often lacks corporate endpoint security agents.'
+        },
+        {
+          heading: '2. Abusing Trusted Cloud Infrastructure (Living off the Cloud)',
+          content: 'Adversaries increasingly host phishing forms on legitimate cloud infrastructure such as Microsoft SharePoint, Google Forms, Firebase, Cloudflare Pages, and AWS S3 buckets. Because the root domains (e.g., sharepoint.com) have high global reputation scores, email filters allow them through by default.'
+        },
+        {
+          heading: '3. CAPTCHA Cloaking & Human Verification Shields',
+          content: 'Threat actors place Cloudflare Turnstile or Google reCAPTCHA challenges in front of their credential harvesting forms. Automated security scanners cannot solve the CAPTCHA and therefore never see the underlying phishing form, leaving the site unflagged on global blocklists.'
+        },
+        {
+          heading: '4. OAuth Device Code & Illicit Consent Grant Attacks',
+          content: 'Rather than stealing passwords, sophisticated attackers prompt users to grant permissions to a malicious OAuth application. Once authorized, the app receives persistent API tokens allowing access to mailboxes and files without triggering password expiration or MFA challenges.'
+        }
+      ],
+      keyTakeaways: [
+        'Quishing bypasses text filters by placing deceptive URLs into images scanned on unmanaged mobile devices.',
+        'Attackers abuse legitimate cloud hosting domains to inherit high reputation scores.',
+        'Always verify third-party OAuth app permission requests before approving corporate access.'
+      ]
+    }
   ]
 
+  const categories = [
+    { id: 'all', label: 'All Articles' },
+    { id: 'attack_vectors', label: 'Attack Vectors' },
+    { id: 'url_forensics', label: 'URL Forensics' },
+    { id: 'threat_intel', label: 'Threat Intelligence' },
+    { id: 'engine', label: 'Engine Explainer' },
+    { id: 'defense', label: 'Defensive Guides' },
+    { id: 'evasion', label: 'Evasion Tactics' },
+  ]
+
+  const filteredArticles = activeCategory === 'all'
+    ? articles
+    : articles.filter(a => a.category === activeCategory)
+
   return (
-    <div className="page-view how-it-works-page-view">
-      <section className="section process-editorial-section">
+    <div className="page-view blog-page-view">
+      <section className="section blog-editorial-section">
         <div className="section-container">
           <div className="section-intro">
-            <span className="editorial-eyebrow">THE INSPECTION PROCESS</span>
-            <h2 className="section-title">A security analysis flow without the noise.</h2>
+            <span className="editorial-eyebrow">CYBERSECURITY BLOG</span>
+            <h2 className="section-title">Cybersecurity insights, phishing awareness, and practical guidance.</h2>
             <p className="section-subtitle">
-              PhishGuard moves from raw URL input to transparent evidence, turning complex cybersecurity telemetry into clear, actionable intelligence.
+              In-depth technical analysis, defensive playbooks, and threat intelligence breakdowns to help you recognize and neutralize deceptive web threats.
             </p>
           </div>
 
-          <div className="process-cards-row">
-            {steps.map(s => (
-              <div key={s.num} className="process-editorial-card">
-                <span className="process-step-number">{s.num}</span>
-                <div className="process-divider-dot" />
-                <h3 className="process-step-title">{s.title}</h3>
-                <p className="process-step-desc">{s.desc}</p>
-              </div>
+          {/* Category Filter Pills */}
+          <div className="blog-filter-bar">
+            {categories.map(cat => (
+              <button
+                key={cat.id}
+                type="button"
+                className={`blog-filter-btn ${activeCategory === cat.id ? 'blog-filter-active' : ''}`}
+                onClick={() => setActiveCategory(cat.id)}
+              >
+                {cat.label}
+              </button>
             ))}
           </div>
 
+          {/* Articles Grid */}
+          <div className="blog-articles-grid">
+            {filteredArticles.map((article, idx) => (
+              <article
+                key={article.id}
+                className={`blog-card ${idx % 2 === 0 ? 'blog-card-dark' : 'blog-card-light'}`}
+              >
+                <div className="blog-card-top">
+                  <span className="blog-card-tag">{article.tag}</span>
+                  <div className="blog-card-meta">
+                    <span className="blog-badge">{article.badge}</span>
+                    <span className="blog-read-time">{article.readTime}</span>
+                  </div>
+                </div>
+
+                <h3 className="blog-card-title">{article.title}</h3>
+                <p className="blog-card-summary">{article.summary}</p>
+
+                <div className="blog-card-sections-preview">
+                  {article.sections.slice(0, 2).map((sec, sIdx) => (
+                    <div key={sIdx} className="blog-sec-item">
+                      <strong className="blog-sec-heading">{sec.heading}</strong>
+                      <p className="blog-sec-text">{sec.content}</p>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="blog-takeaway-box">
+                  <span className="blog-takeaway-label">KEY TAKEAWAY:</span>
+                  <p className="blog-takeaway-text">{article.keyTakeaways[0]}</p>
+                </div>
+
+                <div className="blog-card-actions">
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm blog-read-btn"
+                    onClick={() => setSelectedArticle(article)}
+                  >
+                    <span>Read Full Analysis</span>
+                    <ArrowUpRight />
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+
+          {/* Article Modal Reader */}
+          {selectedArticle && (
+            <div className="blog-modal-backdrop" onClick={() => setSelectedArticle(null)} role="dialog" aria-modal="true">
+              <div className="blog-modal-content" onClick={e => e.stopPropagation()}>
+                <div className="blog-modal-header">
+                  <div className="blog-modal-tags">
+                    <span className="blog-card-tag">{selectedArticle.tag}</span>
+                    <span className="blog-badge">{selectedArticle.badge}</span>
+                    <span className="blog-read-time">{selectedArticle.readTime}</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="blog-modal-close-btn"
+                    onClick={() => setSelectedArticle(null)}
+                    aria-label="Close article"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <h2 className="blog-modal-title">{selectedArticle.title}</h2>
+                <p className="blog-modal-summary">{selectedArticle.summary}</p>
+
+                <div className="blog-modal-body">
+                  {selectedArticle.sections.map((sec, sIdx) => (
+                    <div key={sIdx} className="blog-modal-section">
+                      <h4 className="blog-modal-section-title">{sec.heading}</h4>
+                      <p className="blog-modal-section-p">{sec.content}</p>
+                    </div>
+                  ))}
+
+                  <div className="blog-modal-takeaways">
+                    <h4 className="blog-modal-takeaways-title">Essential Takeaways</h4>
+                    <ul className="blog-modal-takeaway-list">
+                      {selectedArticle.keyTakeaways.map((item, tIdx) => (
+                        <li key={tIdx}>
+                          <span className="bullet-check">✓</span>
+                          <span>{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+
+                <div className="blog-modal-footer">
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setSelectedArticle(null)}
+                  >
+                    Close Article
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-sm"
+                    onClick={() => {
+                      setSelectedArticle(null)
+                      onNavigate('scanner')
+                    }}
+                  >
+                    <span>Test a Link Now</span>
+                    <ArrowUpRight />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Bottom CTA Banner */}
           <div className="page-bottom-cta-banner">
             <div className="cta-banner-text">
               <h3>Ready to inspect a link?</h3>
@@ -1357,139 +3434,6 @@ function HowItWorksPage({ onNavigate }: { onNavigate: (route: PageRoute) => void
               onClick={() => onNavigate('scanner')}
             >
               <span>Launch Scanner</span>
-              <ArrowUpRight />
-            </button>
-          </div>
-        </div>
-      </section>
-    </div>
-  )
-}
-
-// --------------------------------------------------------------------------
-// PAGE 4: CAPABILITIES (/capabilities)
-// --------------------------------------------------------------------------
-function CapabilitiesPage({ onNavigate }: { onNavigate: (route: PageRoute) => void }) {
-  const featureStories = [
-    {
-      tag: 'TYPOSQUATTING & BRAND SPOOFING',
-      headline: 'Attackers don\'t invent new names. They misspell familiar ones.',
-      copy: 'Typosquatting takes advantage of small typos, character insertions, or digit swaps (such as substituting "1" for "l" or "0" for "o"). PhishGuard tests domains against known corporate targets to uncover brand impersonation before you type your credentials.',
-      bullets: ['Levenshtein edit-distance calculations', 'Leet-speak & numeric substitution detection', 'Subdomain brand trickery verification'],
-      badge: 'Signal 01',
-    },
-    {
-      tag: 'HOMOGLYPH & UNICODE AUDIT',
-      headline: 'One lookalike character can deceive the human eye.',
-      copy: 'Internationalized Domain Names (IDNs) allow foreign alphabets in web addresses. Cybercriminals exploit this by swapping Latin letters for visually indistinguishable Cyrillic or Greek characters. PhishGuard checks the exact Unicode code points to detect hidden impostor domains.',
-      bullets: ['Cyrillic & Greek lookalike mapping', 'Punycode and ASCII decomposition', 'Visual homoglyph alert generation'],
-      badge: 'Signal 02',
-    },
-    {
-      tag: 'REGISTRY & DOMAIN AGE',
-      headline: 'Newly registered domains demand additional caution.',
-      copy: 'Malicious infrastructure is often stood up hours before a spear-phishing campaign launches. PhishGuard audits public WHOIS/RDAP signals, highlighting newly created domains (under 30 days) and evaluating registrar reputation without fabricating telemetry.',
-      bullets: ['Domain creation & expiration dates', 'Public registrar organization telemetry', 'Domain tenure risk factor weighting'],
-      badge: 'Signal 03',
-    },
-  ]
-
-  return (
-    <div className="page-view capabilities-page-view">
-      <section className="section editorial-story-section">
-        <div className="section-container">
-          <div className="section-intro">
-            <span className="editorial-eyebrow">CORE CAPABILITIES</span>
-            <h2 className="section-title">Look beyond the URL.</h2>
-            <p className="section-subtitle">
-              Phishing links disguise their true intent behind clever domain tricks and encoded paths. PhishGuard exposes every layer.
-            </p>
-          </div>
-
-          <div className="story-rows-container">
-            {featureStories.map((story, i) => (
-              <div key={story.tag} className={`story-row ${i % 2 === 1 ? 'story-reversed' : ''}`}>
-                <div className="story-content-col">
-                  <span className="story-tag-pill">{story.tag}</span>
-                  <h3 className="story-headline">{story.headline}</h3>
-                  <p className="story-copy">{story.copy}</p>
-                  <ul className="story-bullet-list">
-                    {story.bullets.map((b, bi) => (
-                      <li key={bi}>
-                        <span className="bullet-check">✓</span>
-                        <span>{b}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="story-visual-col">
-                  <div className="story-visual-card">
-                    <div className="visual-card-top">
-                      <span className="visual-dot" />
-                      <span className="visual-badge">{story.badge}</span>
-                    </div>
-                    <div className="visual-display-body">
-                      {i === 0 && (
-                        <div className="visual-mock mock-typo">
-                          <div className="mock-row spoofed">
-                            <span className="mock-label">Spoofed:</span>
-                            <code>secure-paypa1-login.com</code>
-                            <span className="mock-flag">⚠️ '1' used for 'l'</span>
-                          </div>
-                          <div className="mock-arrow">↓ Target Brand Comparison</div>
-                          <div className="mock-row legit">
-                            <span className="mock-label">Legitimate:</span>
-                            <code>paypal.com</code>
-                            <span className="mock-tag-clean">Official Origin</span>
-                          </div>
-                        </div>
-                      )}
-                      {i === 1 && (
-                        <div className="visual-mock mock-homo">
-                          <div className="mock-char-compare">
-                            <div className="char-box fraud">
-                              <span className="char-display">googӏe.com</span>
-                              <span className="char-sub">Cyrillic Small Letter Palochka (U+04CF)</span>
-                            </div>
-                            <div className="char-vs">VS</div>
-                            <div className="char-box safe">
-                              <span className="char-display">google.com</span>
-                              <span className="char-sub">Latin Small Letter L (U+006C)</span>
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                      {i === 2 && (
-                        <div className="visual-mock mock-whois">
-                          <div className="whois-metric-pill">
-                            <span className="whois-num">14</span>
-                            <span className="whois-unit">Days Old</span>
-                          </div>
-                          <div className="whois-alert-banner">
-                            <strong>Newly Registered Domain Signal</strong>
-                            <p>Created on 2026-09-16. Recent registrations warrant elevated caution.</p>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <div className="page-bottom-cta-banner">
-            <div className="cta-banner-text">
-              <h3>Experience deep URL forensics</h3>
-              <p>Audit domains across all six signals in seconds.</p>
-            </div>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={() => onNavigate('scanner')}
-            >
-              <span>Start Scanning</span>
               <ArrowUpRight />
             </button>
           </div>
@@ -1723,10 +3667,9 @@ function Footer({ onNavigate }: { onNavigate: (route: PageRoute) => void }) {
           <div className="footer-links-col">
             <span className="footer-col-title">NAVIGATION</span>
             <ul className="footer-link-list">
-              <li><button type="button" className="footer-nav-btn" onClick={() => onNavigate('scanner')}>Scanner</button></li>
+              <li><button type="button" className="footer-nav-btn" onClick={() => onNavigate('scanner')}>Home</button></li>
               <li><button type="button" className="footer-nav-btn" onClick={() => onNavigate('analysis')}>Analysis Dossier</button></li>
-              <li><button type="button" className="footer-nav-btn" onClick={() => onNavigate('how-it-works')}>How It Works</button></li>
-              <li><button type="button" className="footer-nav-btn" onClick={() => onNavigate('capabilities')}>Core Capabilities</button></li>
+              <li><button type="button" className="footer-nav-btn" onClick={() => onNavigate('blog')}>Blog</button></li>
               <li><button type="button" className="footer-nav-btn" onClick={() => onNavigate('education')}>Education &amp; Guides</button></li>
               <li><button type="button" className="footer-nav-btn" onClick={() => onNavigate('about')}>About PhishGuard</button></li>
               <li><button type="button" className="footer-nav-btn" onClick={() => onNavigate('support')}>Support</button></li>
@@ -1910,7 +3853,12 @@ export default function App() {
     const handleHashOrPopState = () => {
       document.title = 'PhishGuard'
       const hash = window.location.hash.replace('#/', '').replace('#', '')
-      const validRoutes: PageRoute[] = ['scanner', 'analysis', 'how-it-works', 'capabilities', 'education', 'about', 'support']
+      if (hash === 'how-it-works' || hash === 'capabilities') {
+        setCurrentRoute('blog')
+        window.location.hash = '#/blog'
+        return
+      }
+      const validRoutes: PageRoute[] = ['scanner', 'analysis', 'blog', 'education', 'about', 'support']
       if (validRoutes.includes(hash as PageRoute)) {
         setCurrentRoute(hash as PageRoute)
       } else {
@@ -1951,34 +3899,80 @@ export default function App() {
 
   // Triggered when user clicks "Inspect URL" on Scanner page (smooth navigation to analysis)
   const handleStartInspectionFromScanner = (url: string) => {
-    setActiveUrl(url)
+    const trimmed = url.trim()
+    if (!trimmed) return
+    setActiveUrl(trimmed)
     setAnalysisState('scanning')
     setAnalysisResult(null)
     setAnalysisError(null)
+    void handleCompleteScan(trimmed)
     navigate('analysis', 'forward')
   }
 
-  // Triggered when user clicks "Inspect URL" directly on Analysis page (in-place scan without route reload)
+  // Triggered when user clicks "Inspect URL" directly on the Analysis page.
   const handleStartInspectionOnAnalysis = (url: string) => {
-    setActiveUrl(url)
+    const trimmed = url.trim()
+    if (!trimmed) return
+    setActiveUrl(trimmed)
     setAnalysisState('scanning')
     setAnalysisResult(null)
     setAnalysisError(null)
+    void handleCompleteScan(trimmed)
   }
 
-  // Fetch live backend enrichment. The destination URL is never opened by the frontend.
-  const handleCompleteScan = (url: string) => {
-    void fetchRemoteAnalysis(url)
-      .then(result => {
-        setAnalysisResult(result)
-        setAnalysisError(null)
-        setAnalysisState('completed')
+  // Triggered when the scan completes on the Analysis page
+  const handleCompleteScan = async (url: string) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), ANALYSIS_TIMEOUT_MS)
+    try {
+      const response = await fetch(BACKEND_ANALYSIS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ url: normalizeUserUrl(url) }),
+        signal: controller.signal,
       })
-      .catch(error => {
-        setAnalysisResult(null)
-        setAnalysisError(error instanceof Error ? error.message : 'Unable to reach the URL analysis backend.')
-        setAnalysisState('error')
-      })
+
+      if (!response.ok) {
+        let errMsg = `Analysis API returned ${response.status}`
+        try {
+          const errJson = await response.json()
+          if (errJson?.detail) {
+            errMsg = typeof errJson.detail === 'string'
+              ? errJson.detail
+              : Array.isArray(errJson.detail)
+                ? errJson.detail.map((d: { msg?: string }) => d?.msg).filter(Boolean).join('; ') || JSON.stringify(errJson.detail)
+                : JSON.stringify(errJson.detail)
+          }
+        } catch {
+          // Keep the HTTP status fallback.
+        }
+        const httpError = new Error(errMsg) as Error & { isHttp?: boolean }
+        httpError.isHttp = true
+        throw httpError
+      }
+
+      const raw = (await response.json()) as BackendAnalysisResponse
+      const result = mapBackendAnalysisToDetails(raw)
+      setAnalysisResult(result)
+      setAnalysisError(null)
+      setAnalysisState('completed')
+    } catch (error: unknown) {
+      console.error('PhishGuard backend analysis failed:', error)
+      let message: string
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        message = 'The analysis timed out. The domain\'s DNS/WHOIS servers may be slow — please try again.'
+      } else if ((error as { isHttp?: boolean })?.isHttp) {
+        // Backend responded: show its real reason (e.g. invalid URL), not a "server down" hint.
+        message = (error as Error).message
+      } else {
+        message = 'Could not reach the analysis server. Check that the FastAPI server is running at the configured backend URL.'
+      }
+      setAnalysisError(message)
+      setAnalysisResult(null)
+      setAnalysisState('error')
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   // Triggered when user clicks "← Scan Another URL" / "New Scan"
@@ -2002,7 +3996,10 @@ export default function App() {
 
       <main className={`main-content page-transition-wrapper ${transitionClass}`}>
         {currentRoute === 'scanner' && (
-          <ScannerPage onStartInspection={handleStartInspectionFromScanner} />
+          <ScannerPage
+            onStartInspection={handleStartInspectionFromScanner}
+            onNavigate={navigate}
+          />
         )}
 
         {currentRoute === 'analysis' && (
@@ -2012,17 +4009,12 @@ export default function App() {
             analysisResult={analysisResult}
             analysisError={analysisError}
             onStartInspection={handleStartInspectionOnAnalysis}
-            onCompleteScan={handleCompleteScan}
             onResetScan={handleResetScan}
           />
         )}
 
-        {currentRoute === 'how-it-works' && (
-          <HowItWorksPage onNavigate={navigate} />
-        )}
-
-        {currentRoute === 'capabilities' && (
-          <CapabilitiesPage onNavigate={navigate} />
+        {currentRoute === 'blog' && (
+          <BlogPage onNavigate={navigate} />
         )}
 
         {currentRoute === 'education' && (

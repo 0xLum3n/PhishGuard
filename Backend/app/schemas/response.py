@@ -569,6 +569,219 @@ class OSINTResult(BaseModel):
 
     total_matches: int = 0
 
+
+# =========================================================
+# URL SECURITY ANALYSIS — STEP 6.1
+# =========================================================
+
+SecuritySeverity = Literal[
+    "info",
+    "low",
+    "medium",
+    "high",
+]
+
+SecurityConfidence = Literal[
+    "low",
+    "medium",
+    "high",
+]
+
+SecurityAnalysisStatus = Literal[
+    "completed",
+]
+
+
+class SecurityFinding(BaseModel):
+    """
+    One explainable structural security indicator.
+
+    A finding is evidence/context and is not a final
+    maliciousness verdict.
+    """
+
+    rule_id: str
+
+    category: str
+
+    title: str
+
+    severity: SecuritySeverity
+
+    confidence: SecurityConfidence
+
+    description: str
+
+    evidence: dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+
+class URLSecurityResult(BaseModel):
+    """
+    Step 6.1 structural URL security analysis.
+    """
+
+    status: SecurityAnalysisStatus
+
+    total_findings: int = 0
+
+    findings: list[SecurityFinding] = Field(
+        default_factory=list
+    )
+
+    observations: list[str] = Field(
+        default_factory=list
+    )
+
+
+
+class DNSSecurityResult(BaseModel):
+    """
+    Step 6.2 DNS security/context analysis.
+
+    Findings are concrete DNS observations and are not a final
+    safe/suspicious/malicious verdict.
+    """
+
+    status: SecurityAnalysisStatus
+
+    total_findings: int = 0
+
+    findings: list[SecurityFinding] = Field(
+        default_factory=list
+    )
+
+    observations: list[str] = Field(
+        default_factory=list
+    )
+class IPSecurityResult(BaseModel):
+    """
+    Step 6.3 IP intelligence security/context analysis.
+
+    Findings are concrete observations and are not a final
+    safe/suspicious/malicious verdict.
+    """
+
+    status: SecurityAnalysisStatus
+
+    total_findings: int = 0
+
+    findings: list[SecurityFinding] = Field(
+        default_factory=list
+    )
+
+    observations: list[str] = Field(
+        default_factory=list
+    )
+
+
+class WhoisSecurityResult(BaseModel):
+    """
+    Step 6.4 WHOIS/RDAP security/context analysis.
+
+    Findings are concrete lifecycle, registrar, DNSSEC, and
+    data-availability observations and are not a final verdict.
+    """
+
+    status: SecurityAnalysisStatus
+
+    total_findings: int = 0
+
+    findings: list[SecurityFinding] = Field(
+        default_factory=list
+    )
+
+    observations: list[str] = Field(
+        default_factory=list
+    )
+
+
+class OSINTSecurityResult(BaseModel):
+    """
+    Step 6.5 OSINT security/context analysis.
+
+    Findings are derived from collected provider evidence and
+    availability states. They are not a final safe/suspicious/
+    malicious verdict.
+    """
+
+    status: SecurityAnalysisStatus
+
+    total_findings: int = 0
+
+    findings: list[SecurityFinding] = Field(
+        default_factory=list
+    )
+
+    observations: list[str] = Field(
+        default_factory=list
+    )
+
+
+class CorrelationSecurityResult(BaseModel):
+    """
+    Step 6.6 cross-source security/context analysis.
+
+    Findings describe relationships between already-collected URL, DNS,
+    IP, WHOIS/RDAP, and OSINT evidence. They are not a final verdict.
+    """
+
+    status: SecurityAnalysisStatus
+
+    total_findings: int = 0
+
+    findings: list[SecurityFinding] = Field(
+        default_factory=list
+    )
+
+    observations: list[str] = Field(
+        default_factory=list
+    )
+
+
+# =========================================================
+# FINAL ASSESSMENT — STEP 6.7
+# =========================================================
+
+FinalAssessmentVerdict = Literal[
+    "confirmed_threat_evidence",
+    "suspicious_indicators",
+    "no_significant_evidence",
+    "inconclusive",
+]
+
+
+class FinalAssessmentResult(BaseModel):
+    """
+    Step 6.7 final consolidation of the collected evidence.
+
+    This is a transparent assessment, not a claim that a URL is
+    universally safe or malicious beyond the evidence available to
+    PhishGuard at analysis time.
+    """
+
+    status: SecurityAnalysisStatus
+
+    verdict: FinalAssessmentVerdict
+
+    confidence: SecurityConfidence
+
+    summary: str
+
+    rationale: list[str] = Field(
+        default_factory=list
+    )
+
+    evidence_summary: dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+    coverage: dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+
 # =========================================================
 # FINAL ANALYSIS RESPONSE
 # =========================================================
@@ -585,3 +798,17 @@ class AnalysisResponse(BaseModel):
     whois: Optional[WhoisResult] = None
     
     osint: Optional[OSINTResult] = None
+
+    security: Optional[URLSecurityResult] = None
+
+    dns_security: Optional[DNSSecurityResult] = None
+
+    ip_security: Optional[IPSecurityResult] = None
+
+    whois_security: Optional[WhoisSecurityResult] = None
+
+    osint_security: Optional[OSINTSecurityResult] = None
+
+    correlation_security: Optional[CorrelationSecurityResult] = None
+
+    final_assessment: Optional[FinalAssessmentResult] = None
