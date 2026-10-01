@@ -4,7 +4,7 @@ import React, { FormEvent, useEffect, useMemo, useState } from 'react'
 const isMissing = (v?: string | null) => !v || /^(Unavailable|Not published|Not registered)/i.test(v)
 
 // Types
-export type Verdict = 'SAFE' | 'SUSPICIOUS' | 'MALICIOUS' | 'UNREACHABLE' | 'INCONCLUSIVE'
+export type Verdict = 'SAFE' | 'SUSPICIOUS' | 'MALICIOUS'
 export type ScanState = 'idle' | 'scanning' | 'completed' | 'error'
 export type PageRoute = 'scanner' | 'analysis' | 'blog' | 'education' | 'about' | 'support'
 
@@ -48,8 +48,8 @@ export interface AnalysisDetails {
   path: string
   queryParams: Array<{ key: string; value: string; maskedValue: string; isSensitive: boolean; decoded?: string | null }>
   score?: number
-  threatScore?: number
-  confidence?: number | string
+  threatScore: number
+  confidence?: number
   summary: string
   verdict: Verdict | 'UNREACHABLE'
   providers?: Record<string, any>
@@ -57,7 +57,7 @@ export interface AnalysisDetails {
   entropy: {
     domainEntropy: number
     urlEntropy: number
-    level: string
+    level: 'Low' | 'Moderate' | 'High' | 'Suspiciously High'
     explanation: string
   }
   typosquatting: {
@@ -140,10 +140,7 @@ export interface AnalysisDetails {
 // The frontend does not calculate threat scores, entropy, typosquatting,
 // registration facts, DNS facts, or IP intelligence. It sends the URL to
 // the local FastAPI server and renders only the returned payload.
-const configuredApiBase = String(import.meta.env.VITE_API_BASE_URL || '').trim().replace(/\/+$/, '')
-// In local Vite development, use the same-origin /api proxy configured in vite.config.ts.
-// This avoids browser CORS preflight failures when the frontend port differs from the backend.
-const BACKEND_ANALYSIS_URL = configuredApiBase ? `${configuredApiBase}/api/analysis` : '/api/analysis'
+const BACKEND_ANALYSIS_URL = '/api/analysis'
 
 // Cleans common paste/typing variations so the backend gets a parseable URL:
 // "example.com", "//example.com", "http:/x.com", "<https://x.com>", "hxxps://evil[.]com", trailing dots/spaces.
@@ -353,10 +350,14 @@ interface BackendAnalysisResponse {
     coverage: Record<string, unknown>
   } | null
 }
-function formatDate(value?: string | null): string {
-  if (!value) return 'Not published'
-  const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toISOString().slice(0, 10)
+
+
+function humanizeToken(value: string): string {
+  return value.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+}
+
+function isLikelySensitiveParam(name: string): boolean {
+  return /^(access[_-]?token|api[_-]?key|auth(?:orization)?|code|credential|id[_-]?token|otp|pass(?:word|wd)?|pin|refresh[_-]?token|secret|session(?:id)?|sid|token)$/i.test(name.trim())
 }
 
 function maskUrlForDisplay(url: string, queryParameters: Array<{ name: string; value: string; values: string[] }>, hasCredentials: boolean): string {
@@ -383,248 +384,13 @@ function maskUrlForDisplay(url: string, queryParameters: Array<{ name: string; v
   }
 }
 
-function collectBackendFindings(raw: BackendAnalysisResponse): BackendSecurityFinding[] {
-  return [
-    raw.security,
-    raw.dns_security,
-    raw.ip_security,
-    raw.whois_security,
-    raw.osint_security,
-    raw.correlation_security,
-  ].flatMap((result) => result?.findings || [])
+
+function formatDate(value?: string | null): string {
+  if (!value) return 'Not published'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toISOString().slice(0, 10)
 }
 
-function mapAssessmentVerdict(verdict?: 'confirmed_threat_evidence' | 'suspicious_indicators' | 'no_significant_evidence' | 'inconclusive'): Verdict {
-  switch (verdict) {
-    case 'confirmed_threat_evidence':
-      return 'MALICIOUS'
-    case 'suspicious_indicators':
-      return 'SUSPICIOUS'
-    case 'no_significant_evidence':
-      return 'SAFE'
-    default:
-      return 'INCONCLUSIVE'
-  }
-}
-
-function mapBackendAnalysisToDetails(raw: BackendAnalysisResponse): AnalysisDetails {
-  if (!raw?.success || !raw.url) {
-    throw new Error('The analysis backend returned an incomplete analysis payload.')
-  }
-
-  const normalized = raw.url.normalized || raw.url.original
-  const registrableDomain = raw.url.registrable_domain || raw.url.domain || raw.url.hostname
-  const queryParams = (raw.url.query_parameters || []).map((param) => ({
-    key: param.name,
-    value: param.value || '',
-    maskedValue: param.value || '',
-    isSensitive: false,
-    decoded: param.value || '',
-  }))
-  const findings = collectBackendFindings(raw)
-  const sensitiveFindings = findings.filter((finding) => finding.rule_id === 'URL-SENSITIVE-PARAMS')
-  const sensitiveNames = new Set<string>()
-  for (const finding of sensitiveFindings) {
-    const names = finding.evidence?.['parameters']
-    if (Array.isArray(names)) names.forEach((name) => sensitiveNames.add(String(name)))
-  }
-  for (const param of queryParams) {
-    if (sensitiveNames.has(param.key)) {
-      param.isSensitive = true
-      param.maskedValue = '••••••••'
-    }
-  }
-
-  const whois: AnalysisDetails['whois'] = raw.whois
-    ? {
-        domain: raw.whois.domain || registrableDomain,
-        registrar: raw.whois.registrar_name || 'Not published',
-        creationDate: formatDate(raw.whois.registration_date),
-        domainAgeDays: 0,
-        domainAgeFormatted: raw.whois.registration_date ? 'Available from registration date' : 'Not published',
-        status: raw.whois.domain_status?.length ? raw.whois.domain_status.join(', ') : raw.whois.status,
-        isNewlyRegistered: findings.some((f) => f.rule_id === 'WHOIS-RECENTLY-REGISTERED'),
-        dnssec: raw.whois.dnssec || 'Not published',
-        cautionNote: undefined,
-        expirationDate: raw.whois.expiration_date ? formatDate(raw.whois.expiration_date) : null,
-        updatedDate: raw.whois.last_updated_date ? formatDate(raw.whois.last_updated_date) : null,
-        nameservers: (raw.whois.nameservers || []).map((ns) => ns.hostname),
-        source: raw.whois.source || 'RDAP',
-        lookupStatus: raw.whois.status === 'success' ? 'ok' : raw.whois.status === 'rate_limited' ? 'partial' : 'failed',
-        lookupNote: raw.whois.error || null,
-        registered: raw.whois.status === 'success',
-      }
-    : {
-        domain: registrableDomain,
-        registrar: 'Not published',
-        creationDate: 'Not published',
-        domainAgeDays: 0,
-        domainAgeFormatted: 'Not published',
-        status: 'not_applicable',
-        isNewlyRegistered: false,
-        dnssec: 'Not published',
-        cautionNote: undefined,
-        expirationDate: null,
-        updatedDate: null,
-        nameservers: [],
-        source: 'none',
-        lookupStatus: 'failed' as const,
-        lookupNote: null,
-        registered: false,
-      }
-
-  const structure: AnalysisDetails['structure'] = {
-    hasSuspiciousPath: findings.some((f) => f.rule_id === 'URL-SUSPICIOUS-PATH'),
-    suspiciousKeywords: [],
-    hasEncodedChars: findings.some((f) => f.rule_id === 'URL-HIGH-ENCODING' || f.rule_id === 'URL-DOUBLE-ENCODING'),
-    hasObfuscatedQuery: findings.some((f) => ['URL-HIGH-ENCODING', 'URL-DOUBLE-ENCODING', 'URL-MANY-QUERY-PARAMS'].includes(f.rule_id)),
-    hasIpHostname: raw.url.is_ip_address,
-    isHttps: raw.url.scheme === 'https',
-    hasOpaquePath: false,
-    hasRedirectParameter: false,
-    isTrackingOrRedirectService: false,
-    isUrlShortener: false,
-    encodedSegments: [],
-    doubleEncoded: findings.some((f) => f.rule_id === 'URL-DOUBLE-ENCODING'),
-    hasUserInfo: raw.url.has_credentials,
-    subdomainDepth: raw.url.subdomain ? raw.url.subdomain.split('.').filter(Boolean).length : 0,
-    redirectTargets: [],
-    explanation: raw.security?.observations?.join(' ') || 'Structural URL analysis was completed by the backend.',
-  }
-
-  const domainStatus: DomainStatus = raw.url.is_ip_address
-    ? {
-        state: 'ip_host',
-        exists: true,
-        title: 'IP address hostname',
-        detail: 'The submitted URL points directly to an IP address.',
-        confidence: 'high',
-        evidence: [raw.url.hostname],
-        ips: raw.dns.resolved_ips || [],
-      }
-    : {
-        state: raw.dns.status === 'resolved' ? 'live' : raw.dns.status === 'nxdomain' ? 'nonexistent' : 'unknown',
-        exists: raw.dns.status === 'resolved',
-        title: raw.dns.status === 'resolved' ? 'Hostname resolved' : raw.dns.status === 'nxdomain' ? 'Hostname does not exist' : 'Domain state inconclusive',
-        detail: raw.dns.status === 'resolved' ? 'DNS resolution returned one or more addresses.' : raw.dns.status === 'nxdomain' ? 'DNS reported that the queried name does not exist.' : `DNS status: ${raw.dns.status}.`,
-        confidence: raw.dns.status === 'resolved' || raw.dns.status === 'nxdomain' ? 'high' : 'medium',
-        evidence: raw.dns.resolved_ips || [],
-        ips: raw.dns.resolved_ips || [],
-      }
-
-  const assessment = raw.final_assessment
-  const verdict = mapAssessmentVerdict(assessment?.verdict)
-  const reasons = findings.map((finding) => ({
-    title: finding.title,
-    detail: finding.description,
-    severity: finding.severity,
-  }))
-  if (assessment?.rationale?.length) {
-    assessment.rationale.forEach((item) => reasons.push({ title: 'Assessment rationale', detail: item, severity: 'info' }))
-  }
-  if (!reasons.length) {
-    reasons.push({ title: 'No security findings returned', detail: 'The backend completed its analysis without returning actionable security findings.', severity: 'info' })
-  }
-
-  const providerRows = (raw.osint?.providers || []).map((provider) => ({
-    name: provider.source,
-    state: provider.status,
-    detail: provider.error || (provider.matched ? `${provider.match_count} match(es)` : 'No matching evidence returned'),
-  }))
-
-  return {
-    url: raw.url.original || raw.url.normalized,
-    maskedUrl: maskUrlForDisplay(raw.url.original || raw.url.normalized, raw.url.query_parameters || [], raw.url.has_credentials),
-    normalizedUrl: normalized,
-    protocol: raw.url.scheme,
-    hostname: raw.url.hostname,
-    domain: registrableDomain,
-    tld: raw.url.tld ? `.${raw.url.tld.replace(/^\./, '')}` : '',
-    path: raw.url.path || '/',
-    queryParams,
-    threatScore: undefined,
-    score: undefined,
-    confidence: assessment?.confidence,
-    summary: assessment?.summary || 'The backend completed the URL analysis.',
-    verdict,
-    osint: {
-      url: raw.url.original,
-      hostname: raw.url.hostname,
-      domain: registrableDomain,
-      subdomain: raw.url.subdomain || undefined,
-      tld: raw.url.tld || undefined,
-      scheme: raw.url.scheme,
-      dnsStatus: raw.dns.status,
-      resolvedIps: raw.dns.resolved_ips || [],
-      ipv6: raw.dns.hostname_records?.AAAA?.records || [],
-      cname: raw.dns.hostname_records?.CNAME?.records || [],
-      domainState: raw.dns.status,
-      domainExists: raw.dns.status === 'resolved' ? true : raw.dns.status === 'nxdomain' ? false : undefined,
-      domainConfidence: raw.dns.status === 'resolved' || raw.dns.status === 'nxdomain' ? 'high' : 'medium',
-      queryParameterCount: raw.url.query_parameters?.reduce((sum, p) => sum + Math.max(1, p.values?.length || 0), 0) || 0,
-    },
-    entropy: {
-      domainEntropy: 0,
-      urlEntropy: 0,
-      level: 'Not provided by current backend API',
-      explanation: 'The current backend response does not expose entropy metrics.',
-    },
-    typosquatting: {
-      detected: false,
-      explanation: 'The current backend response does not expose a dedicated typosquatting result.',
-    },
-    homoglyphs: {
-      detected: false,
-      characters: [],
-      explanation: 'The current backend response does not expose a dedicated homoglyph result.',
-    },
-    structure,
-    whois,
-    providers: {
-      dns: {
-        status: raw.dns.status,
-        ips: raw.dns.resolved_ips || [],
-      },
-      rdap: raw.whois,
-      ip_geolocation: raw.ip_intelligence,
-      osint: raw.osint,
-    },
-    providerRows,
-    domainStatus,
-    reasons,
-    intelligence: {
-      dns: {
-        ips: raw.dns.resolved_ips || [],
-        ipv6: raw.dns.hostname_records?.AAAA?.records || [],
-        cname: raw.dns.hostname_records?.CNAME?.records || [],
-        status: raw.dns.status,
-      },
-      reputation: {},
-      ipIntelligence: {
-        ip: raw.ip_intelligence.results?.[0]?.ip,
-        geolocation: raw.ip_intelligence.results?.[0]
-          ? {
-              country: raw.ip_intelligence.results[0].country_name || undefined,
-              region: raw.ip_intelligence.results[0].region || undefined,
-              city: raw.ip_intelligence.results[0].city || undefined,
-              latitude: raw.ip_intelligence.results[0].latitude || undefined,
-              longitude: raw.ip_intelligence.results[0].longitude || undefined,
-              asn: raw.ip_intelligence.results[0].asn || undefined,
-              org: raw.ip_intelligence.results[0].organization || undefined,
-            }
-          : undefined,
-      },
-      signals: findings.map((finding) => ({
-        name: finding.title,
-        score: 0,
-        detail: finding.description,
-        severity: finding.severity,
-      })),
-      providers: providerRows,
-      providerTotal: providerRows.length,
-    },
-  }
-}
 // Preset Samples for quick testing
 const SAMPLE_URLS = [
   { label: 'PayPal Spoof', url: 'https://secure-paypa1-login.com/account/verify?token=8f9a2b1c', type: 'Typosquatting' },
@@ -636,13 +402,13 @@ const SAMPLE_URLS = [
 
 // Inspection Steps for Scanner Flow
 const SCAN_STEPS = [
-  { id: '01', name: 'Parsing URL structure', desc: 'Scheme, domain hierarchy, port, path & query' },
-  { id: '02', name: 'Resolving DNS', desc: 'A, AAAA, CNAME, MX, NS & TXT context' },
-  { id: '03', name: 'Enriching IP addresses', desc: 'Public/private classification and geolocation' },
-  { id: '04', name: 'Querying RDAP', desc: 'Registration dates, registrar & DNSSEC' },
-  { id: '05', name: 'Checking OSINT sources', desc: 'PhishTank, URLhaus and urlscan evidence' },
-  { id: '06', name: 'Analyzing security findings', desc: 'URL, DNS, IP, WHOIS, OSINT & correlations' },
-  { id: '07', name: 'Building final assessment', desc: 'Evidence summary, confidence & coverage' },
+  { id: '01', name: 'Inspecting URL Structure', desc: 'Protocol, Host, Subdomains, Query Tokens' },
+  { id: '02', name: 'Checking Domain & TLD', desc: 'Syntax validation, DNS origin structure' },
+  { id: '03', name: 'Detecting Typosquatting', desc: 'Brand imitation, leet-speak & edit distance' },
+  { id: '04', name: 'Detecting Homoglyphs', desc: 'Unicode lookalike and Cyrillic character scanner' },
+  { id: '05', name: 'Analyzing Shannon Entropy', desc: 'Randomness metrics & payload obfuscation' },
+  { id: '06', name: 'Inspecting URL Path & Query', desc: 'Credential harvesting keywords & hex encoding' },
+  { id: '07', name: 'Querying Network Intelligence', desc: 'DNS resolution, RDAP registration & IP geolocation' },
 ]
 
 // SVG Icons & UI Graphics
@@ -867,7 +633,7 @@ function Navbar({
 }
 
 // Threat Gauge Circular Meter Component with Animated Score
-function ThreatScoreGauge({ score, verdict }: { score?: number; verdict: Verdict | 'UNREACHABLE' }) {
+function ThreatScoreGauge({ score, verdict }: { score: number; verdict: Verdict | 'UNREACHABLE' }) {
   const [displayedScore, setDisplayedScore] = useState(0)
   const radius = 86
   const stroke = 12
@@ -877,7 +643,7 @@ function ThreatScoreGauge({ score, verdict }: { score?: number; verdict: Verdict
   useEffect(() => {
     // Respect reduced-motion preferences
     if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      setDisplayedScore(score ?? 0)
+      setDisplayedScore(score)
       return
     }
 
@@ -889,13 +655,13 @@ function ThreatScoreGauge({ score, verdict }: { score?: number; verdict: Verdict
       const progress = Math.min(elapsed / duration, 1)
       // Ease out cubic
       const ease = 1 - Math.pow(1 - progress, 3)
-      const current = Math.round(ease * (score ?? 0))
+      const current = Math.round(ease * score)
       setDisplayedScore(current)
 
       if (progress < 1) {
         requestAnimationFrame(animateNumber)
       } else {
-        setDisplayedScore(score ?? 0)
+        setDisplayedScore(score)
       }
     }
 
@@ -903,7 +669,7 @@ function ThreatScoreGauge({ score, verdict }: { score?: number; verdict: Verdict
     return () => cancelAnimationFrame(frameId)
   }, [score])
 
-  const strokeDashoffset = circumference - ((score ?? 0) / 100) * circumference
+  const strokeDashoffset = circumference - (displayedScore / 100) * circumference
   const verdictColorClass =
     verdict === 'SAFE' ? 'color-safe' : verdict === 'SUSPICIOUS' ? 'color-suspicious' : verdict === 'UNREACHABLE' ? 'color-unreachable' : 'color-malicious'
 
@@ -934,8 +700,8 @@ function ThreatScoreGauge({ score, verdict }: { score?: number; verdict: Verdict
           />
         </svg>
         <div className="gauge-center-content">
-          <span className="gauge-score-value">{typeof score === 'number' ? displayedScore : '—'}</span>
-          <span className="gauge-score-total">{typeof score === 'number' ? '/ 100' : 'evidence'}</span>
+          <span className="gauge-score-value">{displayedScore}</span>
+          <span className="gauge-score-total">/ 100</span>
           <span className="gauge-score-badge">{verdict === 'UNREACHABLE' ? 'NOT FOUND' : verdict}</span>
         </div>
       </div>
@@ -2507,900 +2273,265 @@ function assessmentLabel(verdict?: AssessmentVerdict): string {
   }
 }
 
-function assessmentTone(verdict?: AssessmentVerdict): 'safe' | 'suspicious' | 'threat' | 'neutral' {
-  switch (verdict) {
-    case 'no_significant_evidence': return 'safe'
-    case 'suspicious_indicators': return 'suspicious'
-    case 'confirmed_threat_evidence': return 'threat'
-    default: return 'neutral'
-  }
-}
-
-function humanizeToken(value: string): string {
-  return value.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-}
-
-function severityRank(severity: BackendSecurityFinding['severity']): number {
-  return ({ high: 4, medium: 3, low: 2, info: 1 } as Record<string, number>)[severity] || 0
-}
-
-function formatFindingEvidence(evidence?: Record<string, unknown>): string[] {
-  if (!evidence) return []
-  return Object.entries(evidence).flatMap(([key, value]) => {
-    if (value === null || value === undefined || value === '') return []
-    if (Array.isArray(value)) return [`${humanizeToken(key)}: ${value.map(String).join(', ')}`]
-    if (typeof value === 'object') return [`${humanizeToken(key)}: ${JSON.stringify(value)}`]
-    return [`${humanizeToken(key)}: ${String(value)}`]
-  })
-}
-
-function isLikelySensitiveParam(name: string): boolean {
-  return /^(access[_-]?token|api[_-]?key|auth(?:orization)?|code|credential|id[_-]?token|otp|pass(?:word|wd)?|pin|refresh[_-]?token|secret|session(?:id)?|sid|token)$/i.test(name.trim())
-}
-
-function displayQueryParamValue(param: { name: string; value: string; values: string[] }): string {
-  return isLikelySensitiveParam(param.name) ? '••••••••' : (param.value || '(empty)')
-}
-
-function UrlPartsRibbon({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
-  const url = raw.url
-  let maskedQuery = url.query || ''
-  try {
-    const masked = new URL(maskUrlForDisplay(url.original || url.normalized, url.query_parameters || [], url.has_credentials))
-    maskedQuery = masked.search.replace(/^\?/, '')
-  } catch {
-    maskedQuery = (url.query_parameters || []).map(param => `${param.name}=${displayQueryParamValue(param)}`).join('&')
-  }
-  const query = maskedQuery ? `?${maskedQuery}` : '?'
-  const fragment = url.fragment ? `#${url.fragment}` : '#—'
-  const pieces = [
-    { key: 'scheme', label: 'Scheme', value: `${url.scheme}://`, tone: 'scheme' },
-    { key: 'subdomain', label: 'Subdomain', value: url.subdomain ? `${url.subdomain}.` : '—', tone: 'subdomain' },
-    { key: 'domain', label: 'Domain', value: url.domain || url.registrable_domain || url.hostname, tone: 'domain' },
-    { key: 'tld', label: 'Top Level Domain', value: url.tld ? `.${url.tld.replace(/^\./, '')}` : '—', tone: 'tld' },
-    { key: 'port', label: 'Port Number', value: url.port ? `:${url.port}` : '—', tone: 'port' },
-    { key: 'path', label: 'Path', value: url.path || '/', tone: 'path' },
-    { key: 'separator', label: 'Query Separator', value: url.query ? '?' : '—', tone: 'separator' },
-    { key: 'query', label: 'Query String / Parameters', value: maskedQuery || '—', tone: 'query' },
-    { key: 'fragment', label: 'Fragment', value: url.fragment ? `#${url.fragment}` : '—', tone: 'fragment' },
-  ]
-
-  return (
-    <div className="url-parts-visual-shell">
-      <div className="url-parts-visual-head">
-        <div>
-          <span className="analysis-eyebrow">01 · URL DECOMPOSITION</span>
-          <h3>Every component of the submitted address.</h3>
-        </div>
-        <span className="analysis-mini-badge">Backend parsed</span>
-      </div>
-      <div className="url-original-bar">
-        <span>Submitted URL</span>
-        <code>{maskUrlForDisplay(url.original, url.query_parameters || [], url.has_credentials)}</code>
-      </div>
-      <div className="url-parts-ribbon" role="list" aria-label="Parsed URL parts">
-        {pieces.map(piece => (
-          <div className={`url-part-cell url-part-${piece.tone}`} key={piece.key} role="listitem">
-            <span className="url-part-label">{piece.label}</span>
-            <code title={piece.value}>{piece.value}</code>
-          </div>
-        ))}
-      </div>
-      <div className="url-meta-strip">
-        <span><strong>Normalized:</strong> <code>{url.normalized}</code></span>
-        <span><strong>Credentials:</strong> {url.has_credentials ? 'Present (redacted)' : 'None detected'}</span>
-        <span><strong>Query params:</strong> {url.query_parameters?.length || 0}</span>
-        <span><strong>Fragment:</strong> {url.has_fragment ? 'Present' : 'None'}</span>
-      </div>
-    </div>
-  )
-}
-
-function DnsRecordsTable({ records, title }: { records?: Record<string, { record_type: string; queried_name: string; status: string; records: string[]; error?: string | null }>; title: string }): React.ReactElement | null {
-  const entries = Object.entries(records || {})
-  if (!entries.length) return null
-  return (
-    <div className="dns-record-block">
-      <div className="subsection-title">{title}</div>
-      <div className="dns-record-grid">
-        {entries.map(([type, record]) => (
-          <div className="dns-record-card" key={`${title}-${type}`}>
-            <div className="dns-record-top">
-              <span className="code-badge">{type}</span>
-              <span className={`provider-state state-${record.status}`}>{humanizeToken(record.status)}</span>
-            </div>
-            <code className="dns-query-name">{record.queried_name}</code>
-            {record.records?.length ? (
-              <div className="dns-values">
-                {record.records.map((value, index) => <code key={`${value}-${index}`}>{value}</code>)}
-              </div>
-            ) : (
-              <span className="empty-inline">{record.error || 'No records returned'}</span>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function IpIntelCard({ result }: { result: BackendAnalysisResponse['ip_intelligence']['results'][number] }): React.ReactElement {
-  const geo = [result.city, result.region, result.country_name].filter(Boolean).join(', ') || 'Geolocation unavailable'
-  return (
-    <article className="intel-card ip-intel-card">
-      <div className="intel-card-top">
-        <div>
-          <span className="analysis-eyebrow">IP {result.version}</span>
-          <h4><code>{result.ip}</code></h4>
-        </div>
-        <span className={`ip-class-chip ip-${result.classification}`}>{humanizeToken(result.classification)}</span>
-      </div>
-      <div className="intel-data-grid">
-        <div><span>Lookup</span><strong>{humanizeToken(result.status)}</strong></div>
-        <div><span>Country</span><strong>{geo}</strong></div>
-        <div><span>ASN</span><strong>{result.asn || 'Not published'}</strong></div>
-        <div><span>Organization</span><strong>{result.organization || 'Not published'}</strong></div>
-        <div><span>Timezone</span><strong>{result.timezone || 'Not published'}</strong></div>
-        <div><span>Coordinates</span><strong>{result.latitude != null && result.longitude != null ? `${result.latitude}, ${result.longitude}` : 'Not published'}</strong></div>
-      </div>
-      {result.hostname && <div className="intel-footline"><span>Reverse hostname</span><code>{result.hostname}</code></div>}
-      {result.error && <div className="intel-warning">{result.error}</div>}
-    </article>
-  )
-}
-
-function ProviderStatusCard({ provider }: { provider: BackendOSINTProvider }): React.ReactElement {
-  const providerLabel = provider.source || 'Unknown provider'
-  const matched = provider.matched || provider.match_count > 0
-  const stateClass = matched ? 'provider-hit' : provider.status === 'no_match' ? 'provider-clean' : 'provider-neutral'
-  return (
-    <article className={`osint-provider-card ${stateClass}`}>
-      <div className="provider-card-top">
-        <div>
-          <span className="provider-name">{providerLabel}</span>
-          <span className="provider-query">{provider.query}</span>
-        </div>
-        <span className={`provider-state state-${provider.status}`}>{humanizeToken(provider.status)}</span>
-      </div>
-      <div className="provider-metrics">
-        <span><strong>{provider.match_count}</strong> match{provider.match_count === 1 ? '' : 'es'}</span>
-        {provider.metadata && Object.keys(provider.metadata).length > 0 && <span>{Object.keys(provider.metadata).length} metadata fields</span>}
-      </div>
-      {provider.error && <div className="provider-error">{provider.error}</div>}
-      {provider.matches?.length > 0 && (
-        <div className="provider-match-list">
-          {provider.matches.slice(0, 4).map((match, index) => (
-            <div className="provider-match-item" key={`${match.indicator}-${index}`}>
-              <span className="match-type">{humanizeToken(match.match_type)}</span>
-              <code>{match.indicator}</code>
-              {match.reference && /^https?:\/\//i.test(match.reference) && (
-                <a href={match.reference} target="_blank" rel="noopener noreferrer">Reference ↗</a>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </article>
-  )
-}
-
-function SecurityFindingsSection({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
-  const groups: Array<{ title: string; result?: BackendSecurityResult | null }> = [
-    { title: 'URL structure', result: raw.security },
-    { title: 'DNS security', result: raw.dns_security },
-    { title: 'IP intelligence', result: raw.ip_security },
-    { title: 'WHOIS / RDAP', result: raw.whois_security },
-    { title: 'OSINT evidence', result: raw.osint_security },
-    { title: 'Cross-source correlation', result: raw.correlation_security },
-  ]
-  const findings = groups.flatMap(group => (group.result?.findings || []).map(f => ({ ...f, group: group.title })))
-    .sort((a, b) => severityRank(b.severity) - severityRank(a.severity))
-
-  return (
-    <section className="analysis-section-card findings-section">
-      <div className="section-card-header">
-        <div>
-          <span className="analysis-eyebrow">06 · SECURITY EVIDENCE</span>
-          <h3>Explainable findings, grouped by analysis layer.</h3>
-        </div>
-        <span className="analysis-count-badge">{findings.length} findings</span>
-      </div>
-      {findings.length === 0 ? (
-        <div className="empty-report-state"><span className="empty-check">✓</span><div><strong>No actionable security findings returned.</strong><p>The backend completed the security layers without reporting a concrete finding.</p></div></div>
-      ) : (
-        <div className="finding-list">
-          {findings.map((finding, index) => (
-            <details className={`finding-row finding-${finding.severity}`} key={`${finding.rule_id}-${index}`} open={index < 3}>
-              <summary>
-                <span className={`severity-dot severity-${finding.severity}`} />
-                <div className="finding-summary-copy">
-                  <strong>{finding.title}</strong>
-                  <span>{finding.group} · {humanizeToken(finding.category)}</span>
-                </div>
-                <span className="finding-rule">{finding.rule_id}</span>
-              </summary>
-              <div className="finding-detail-body">
-                <p>{finding.description}</p>
-                {formatFindingEvidence(finding.evidence).map((line, idx) => <code key={idx}>{line}</code>)}
-                <span className="finding-confidence">Confidence: {humanizeToken(finding.confidence)}</span>
-              </div>
-            </details>
-          ))}
-        </div>
-      )}
-    </section>
-  )
-}
-
-function normalizeDisplayData(value: unknown, parentKey = ''): unknown {
-  if (value === null || value === undefined) return value
-  if (Array.isArray(value)) {
-    return value.map(item => normalizeDisplayData(item, parentKey))
-  }
-  if (typeof value !== 'object') {
-    return value
-  }
-
-  const output: Record<string, unknown> = {}
-  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-    const lowered = key.toLowerCase()
-    if (['password', 'passwd', 'authorization', 'access_token', 'refresh_token', 'api_key', 'apikey', 'secret'].includes(lowered)) {
-      output[key] = child ? '••••••••' : child
-      continue
-    }
-    output[key] = normalizeDisplayData(child, key)
-  }
-  if ('name' in (value as Record<string, unknown>) && 'value' in (value as Record<string, unknown>)) {
-    const name = String((value as Record<string, unknown>).name || '')
-    if (isLikelySensitiveParam(name)) {
-      if ('value' in output) output.value = '••••••••'
-      if ('values' in output) output.values = ['••••••••']
-    }
-  }
-  return output
-}
-
-function displayLeaf(value: unknown): string {
-  if (value === null || value === undefined) return '—'
-  if (typeof value === 'string') return value || '""'
-  if (typeof value === 'boolean') return value ? 'true' : 'false'
-  return String(value)
-}
-
-function JsonTree({ value, depth = 0 }: { value: unknown; depth?: number }): React.ReactElement {
-  if (value === null || value === undefined || typeof value !== 'object') {
-    return <code className="json-tree-leaf">{displayLeaf(value)}</code>
-  }
-  if (Array.isArray(value)) {
-    return (
-      <div className="json-tree-array">
-        {value.length === 0 ? <code className="json-tree-empty">[]</code> : value.map((item, index) => (
-          <div className="json-tree-entry" key={`${depth}-${index}`}>
-            <span className="json-tree-index">{index}</span>
-            <JsonTree value={item} depth={depth + 1} />
-          </div>
-        ))}
-      </div>
-    )
-  }
-  const entries = Object.entries(value as Record<string, unknown>)
-  return (
-    <div className="json-tree-object">
-      {entries.length === 0 ? <code className="json-tree-empty">{'{}'}</code> : entries.map(([key, child]) => (
-        <div className="json-tree-row" key={`${depth}-${key}`}>
-          <span className="json-tree-key">{humanizeToken(key)}</span>
-          <div className="json-tree-value"><JsonTree value={child} depth={depth + 1} /></div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
 function riskTone(score: number): 'safe' | 'suspicious' | 'threat' {
   if (score <= 20) return 'safe'
   if (score <= 60) return 'suspicious'
   return 'threat'
 }
 
-const RISK_DIMENSION_LABELS: Record<string, string> = {
-  direct_threat_intel: 'Direct threat intelligence',
-  url_structure: 'URL structure',
-  dns: 'DNS intelligence',
-  ip_geolocation: 'IP & geolocation',
-  whois_rdap: 'WHOIS / RDAP',
-  osint: 'OSINT analysis findings',
-  osint_context: 'OSINT context',
-  cross_source_correlation: 'Cross-source correlation',
-}
-
-function formatRiskDimension(key: string): string {
-  return RISK_DIMENSION_LABELS[key] || humanizeToken(key)
-}
-
-function RiskSignalGraph({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
-  const dimensions = Object.entries(raw.final_assessment?.risk_dimensions || {})
-    .filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
-    .map(([key, value]) => ({ key, value: Math.max(0, Math.min(100, Number(value))) }))
-    .sort((a, b) => b.value - a.value)
-
-  const [animated, setAnimated] = useState<Record<string, number>>({})
-
-  useEffect(() => {
-    let frame = 0
-    const start = performance.now()
-    const duration = 1100
-    const from = Object.fromEntries(dimensions.map(item => [item.key, 0]))
-    setAnimated(from)
-    if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      setAnimated(Object.fromEntries(dimensions.map(item => [item.key, item.value])))
-      return
+function sanitizeForDisplay(value: unknown, key = ''): unknown {
+  if (/^(password|passwd|authorization|access[_-]?token|refresh[_-]?token|api[_-]?key|apikey|secret)$/i.test(key)) return value ? '••••••••' : value
+  if (Array.isArray(value)) return value.map(item => sanitizeForDisplay(item, key))
+  if (value && typeof value === 'object') {
+    const output: Record<string, unknown> = {}
+    for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>)) {
+      output[childKey] = sanitizeForDisplay(childValue, childKey)
     }
-    const tick = (now: number) => {
-      const t = Math.min(1, (now - start) / duration)
-      const eased = 1 - Math.pow(1 - t, 3)
-      const next: Record<string, number> = {}
-      dimensions.forEach(item => { next[item.key] = item.value * eased })
-      setAnimated(next)
-      if (t < 1) frame = requestAnimationFrame(tick)
+    if ('name' in output && 'value' in output && isLikelySensitiveParam(String(output.name || ''))) {
+      output.value = '••••••••'
+      if ('values' in output) output.values = ['••••••••']
     }
-    frame = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(frame)
-  }, [raw.final_assessment?.risk_score, JSON.stringify(raw.final_assessment?.risk_dimensions || {})])
-
-  if (!dimensions.length) {
-    return <div className="risk-signal-empty">No risk dimensions were returned by the backend for this scan.</div>
+    return output
   }
-
-  return (
-    <div className="risk-signal-graph">
-      <div className="risk-signal-graph-header">
-        <div><span className="analysis-eyebrow">LIVE EVIDENCE DISTRIBUTION</span><strong>{dimensions.length} live dimensions</strong></div>
-        <span className="risk-live-badge"><i /> BACKEND</span>
-      </div>
-      <div className="risk-signal-list">
-        {dimensions.map(item => {
-          const current = animated[item.key] ?? 0
-          return (
-            <div className="risk-signal-row" key={item.key}>
-              <div className="risk-signal-label"><span>{formatRiskDimension(item.key)}</span><strong>{Math.round(current)}/100</strong></div>
-              <div className="risk-signal-track"><span style={{ width: `${current}%` }} /></div>
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
+  return value
 }
 
-function RiskEvidenceContributors({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
-  const events = (raw.final_assessment?.risk_events || [])
-    .filter(event => typeof event?.points === 'number' && Number(event.points) > 0)
-    .slice(0, 5)
-  return (
-    <div className="risk-contributor-panel">
-      <div className="analysis-eyebrow">TOP LIVE RISK CONTRIBUTORS</div>
-      {events.length ? events.map((event, index) => (
-        <div className="risk-contributor-row" key={`${String(event.rule_id || event.signal || 'event')}-${index}`}>
-          <span>{String(event.source || 'backend').replace(/_/g, ' ')}</span>
-          <p>{String(event.title || event.signal || event.rule_id || 'Evidence signal')}</p>
-          <strong>+{Number(event.points)}</strong>
-        </div>
-      )) : (
-        <p className="risk-contributor-empty">No weighted risk contributors were returned. Informational evidence can still appear in the five intelligence panels without increasing the index.</p>
-      )}
-    </div>
-  )
+function scalarText(value: unknown): string {
+  if (value === null || value === undefined) return '—'
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (typeof value === 'string') return value || '""'
+  return String(value)
 }
 
-function RiskGauge({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+function JsonTree({ value, depth = 0 }: { value: unknown; depth?: number }): React.ReactElement {
+  if (value === null || value === undefined || typeof value !== 'object') {
+    return <code className="live-json-leaf">{scalarText(value)}</code>
+  }
+  if (Array.isArray(value)) {
+    return value.length
+      ? <div className="live-json-array">{value.map((item, index) => <div className="live-json-array-row" key={`${depth}-${index}`}><span className="live-json-index">{index}</span><JsonTree value={item} depth={depth + 1} /></div>)}</div>
+      : <code className="live-json-empty">[]</code>
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+  return entries.length
+    ? <div className="live-json-object">{entries.map(([key, child]) => <div className="live-json-row" key={`${depth}-${key}`}><span className="live-json-key">{humanizeToken(key)}</span><div className="live-json-value"><JsonTree value={child} depth={depth + 1} /></div></div>)}</div>
+    : <code className="live-json-empty">{'{}'}</code>
+}
+
+function CountLabel({ count, singular, plural }: { count: number; singular: string; plural?: string }): React.ReactElement {
+  return <b>{count} {count === 1 ? singular : (plural || `${singular}s`)}</b>
+}
+
+function URLPartsReport({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const u = raw.url
+  const queryParameters = u.query_parameters || []
+  let query = u.query || ''
+  try {
+    const masked = new URL(maskUrlForDisplay(u.original, queryParameters, u.has_credentials))
+    query = masked.search.replace(/^\?/, '')
+  } catch {}
+  const pieces: Array<[string, string]> = [
+    ['Scheme', `${u.scheme}://`],
+    ['Subdomain', u.subdomain ? `${u.subdomain}.` : '—'],
+    ['Domain', u.domain || u.registrable_domain || u.hostname],
+    ['TLD', u.tld ? `.${u.tld.replace(/^\./, '')}` : '—'],
+    ['Port', u.port ? `:${u.port}` : 'default'],
+    ['Path', u.path || '/'],
+    ['Query', query ? `?${query}` : '—'],
+    ['Fragment', u.fragment ? `#${u.fragment}` : '—'],
+  ]
+  return <div className="live-section-body">
+    <div className="live-url-display"><span>Submitted URL</span><code>{maskUrlForDisplay(u.original, queryParameters, u.has_credentials)}</code></div>
+    <div className="live-url-ribbon">{pieces.map(([label, value]) => <div className="live-url-piece" key={label}><span>{label}</span><code>{value}</code></div>)}</div>
+    <div className="live-fact-grid">{[
+      ['Normalized', u.normalized],
+      ['Hostname', u.hostname],
+      ['Registrable domain', u.registrable_domain || '—'],
+      ['Credentials present', u.has_credentials ? 'Yes (redacted)' : 'No'],
+      ['Query present', u.has_query ? 'Yes' : 'No'],
+      ['Fragment present', u.has_fragment ? 'Yes' : 'No'],
+      ['IP hostname', u.is_ip_address ? 'Yes' : 'No'],
+      ['Parameter count', String(queryParameters.length)],
+    ].map(([key, value]) => <div className="live-fact" key={key}><span>{key}</span><strong>{value}</strong></div>)}</div>
+    <div className="live-subtitle-row"><span>Query parameters</span><CountLabel count={queryParameters.length} singular="parameter" /></div>
+    {queryParameters.length ? <div className="live-table-wrap"><table className="live-data-table"><thead><tr><th>Name</th><th>Value</th><th>All values</th></tr></thead><tbody>{queryParameters.map((param, index) => <tr key={`${param.name}-${index}`}><td><code>{param.name}</code></td><td><code>{isLikelySensitiveParam(param.name) ? '••••••••' : (param.value || '""')}</code></td><td><code>{(param.values || []).map(value => isLikelySensitiveParam(param.name) ? '••••••••' : (value || '""')).join(', ') || '—'}</code></td></tr>)}</tbody></table></div> : <div className="live-empty-state">No query parameters were returned.</div>}
+    <details className="live-json-details"><summary>Complete URL JSON</summary><JsonTree value={sanitizeForDisplay(u)} /></details>
+  </div>
+}
+
+function DNSReport({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const dns = raw.dns
+  const renderRecords = (title: string, records?: Record<string, { record_type: string; queried_name: string; status: string; records: string[]; error?: string | null }>) => (
+    <div className="live-record-group">
+      <div className="live-subtitle-row"><span>{title}</span><CountLabel count={Object.keys(records || {}).length} singular="record group" /></div>
+      <div className="live-record-grid">{Object.entries(records || {}).map(([type, record]) => <div className="live-record-card" key={`${title}-${type}`}><div className="live-record-top"><strong>{type}</strong><span className={`live-state live-state-${String(record.status).toLowerCase()}`}>{humanizeToken(record.status)}</span></div><small>{record.queried_name}</small><div className="live-record-values">{record.records?.length ? record.records.map((value, index) => <code key={index}>{value}</code>) : <span>{record.error || 'No records returned.'}</span>}</div></div>)}</div>
+    </div>
+  )
+  return <div className="live-section-body">
+    <div className="live-fact-grid">{[
+      ['Hostname', dns.hostname],
+      ['Registrable domain', dns.registrable_domain || '—'],
+      ['Overall status', humanizeToken(dns.status)],
+      ['Resolved IP count', String(dns.resolved_ips.length)],
+      ['Resolved IPs', dns.resolved_ips.join(', ') || 'None returned'],
+    ].map(([key, value]) => <div className="live-fact" key={key}><span>{key}</span><strong>{value}</strong></div>)}</div>
+    {renderRecords('Hostname records', dns.hostname_records)}
+    {renderRecords('Domain records', dns.domain_records)}
+    {dns.hostname_txt_records && renderRecords('Hostname TXT', { TXT: dns.hostname_txt_records })}
+    <details className="live-json-details"><summary>Complete DNS JSON</summary><JsonTree value={sanitizeForDisplay(dns)} /></details>
+  </div>
+}
+
+function IPReport({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const ip = raw.ip_intelligence
+  return <div className="live-section-body">
+    <div className="live-fact-grid">{[
+      ['Lookup status', humanizeToken(ip.status)],
+      ['Total IPs', String(ip.total_ips)],
+      ['Public IPs', String(ip.public_ips)],
+      ['Enriched IPs', String(ip.enriched_ips)],
+      ['Lookup limit', String(ip.lookup_limit)],
+      ['Limit reached', ip.limit_reached ? 'Yes' : 'No'],
+    ].map(([key, value]) => <div className="live-fact" key={key}><span>{key}</span><strong>{value}</strong></div>)}</div>
+    <div className="live-subtitle-row"><span>IP intelligence results</span><CountLabel count={ip.results.length} singular="address" /></div>
+    {ip.results.length ? ip.results.map(result => <article className="live-ip-card" key={result.ip}>
+      <div className="live-ip-header"><div><strong>{result.ip}</strong><span>{result.version === 4 ? 'IPv4' : 'IPv6'} · {humanizeToken(result.classification)}</span></div><span className={`live-state live-state-${String(result.status).toLowerCase()}`}>{humanizeToken(result.status)}</span></div>
+      <div className="live-fact-grid compact">{[
+        ['Country', result.country_name || result.country_code || 'Not returned'], ['Region', result.region || result.region_code || 'Not returned'], ['City', result.city || 'Not returned'], ['Postal', result.postal || 'Not returned'], ['Latitude', result.latitude == null ? 'Not returned' : String(result.latitude)], ['Longitude', result.longitude == null ? 'Not returned' : String(result.longitude)], ['Timezone', result.timezone || 'Not returned'], ['ASN', result.asn || 'Not returned'], ['Organization', result.organization || 'Not returned'], ['Hostname', result.hostname || 'Not returned'], ['Source', result.source || 'Not returned'],
+      ].map(([key, value]) => <div className="live-fact" key={`${result.ip}-${key}`}><span>{key}</span><strong>{value}</strong></div>)}</div>
+      {result.error && <div className="live-inline-note">{result.error}</div>}
+    </article>) : <div className="live-empty-state">No public IP enrichment results were returned.</div>}
+    <details className="live-json-details"><summary>Complete IP / geolocation JSON</summary><JsonTree value={sanitizeForDisplay(ip)} /></details>
+  </div>
+}
+
+function WhoisReport({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const w = raw.whois
+  if (!w) return <div className="live-section-body"><div className="live-empty-state">WHOIS / RDAP data was not returned.</div></div>
+  return <div className="live-section-body">
+    <div className="live-fact-grid">{[
+      ['Domain', w.domain], ['Status', humanizeToken(w.status)], ['Source', w.source || 'Not returned'], ['RDAP server', w.rdap_server || 'Not returned'], ['Registrar', w.registrar_name || 'Not returned'], ['Registrar ID', w.registrar_id || 'Not returned'], ['Registry', w.registry_name || 'Not returned'], ['Registry ID', w.registry_id || 'Not returned'], ['Registration', formatDate(w.registration_date)], ['Expiration', formatDate(w.expiration_date)], ['Last updated', formatDate(w.last_updated_date)], ['DNSSEC', w.dnssec || 'Not returned'], ['Redacted', w.redacted ? 'Yes' : 'No'],
+    ].map(([key, value]) => <div className="live-fact" key={key}><span>{key}</span><strong>{value}</strong></div>)}</div>
+    <div className="live-subtitle-row"><span>Domain status</span><CountLabel count={w.domain_status.length} singular="status flag" /></div><div className="live-chip-row">{w.domain_status.length ? w.domain_status.map(status => <span className="live-chip" key={status}>{status}</span>) : <span className="live-muted">No status flags returned.</span>}</div>
+    <div className="live-subtitle-row"><span>Nameservers</span><CountLabel count={w.nameservers.length} singular="server" /></div><div className="live-list-grid">{w.nameservers.length ? w.nameservers.map(ns => <div className="live-list-item" key={ns.hostname}><strong>{ns.hostname}</strong><span>IPv4: {ns.ipv4?.join(', ') || '—'} · IPv6: {ns.ipv6?.join(', ') || '—'}</span></div>) : <div className="live-empty-state">No nameservers returned.</div>}</div>
+    <div className="live-subtitle-row"><span>RDAP lifecycle events</span><CountLabel count={w.events?.length || 0} singular="event" /></div><div className="live-table-wrap"><table className="live-data-table"><thead><tr><th>Action</th><th>Date</th></tr></thead><tbody>{w.events?.length ? w.events.map((event, index) => <tr key={`${event.action}-${index}`}><td>{event.action}</td><td>{formatDate(event.date)}</td></tr>) : <tr><td colSpan={2}>No lifecycle events returned.</td></tr>}</tbody></table></div>
+    {w.error && <div className="live-inline-note">{w.error}</div>}
+    <details className="live-json-details"><summary>Complete WHOIS / RDAP JSON</summary><JsonTree value={sanitizeForDisplay(w)} /></details>
+  </div>
+}
+
+function OSINTReport({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const o = raw.osint
+  if (!o) return <div className="live-section-body"><div className="live-empty-state">OSINT data was not returned.</div></div>
+  const usable = o.providers.filter(provider => ['success','no_match'].includes(provider.status)).length
+  return <div className="live-section-body">
+    <div className="live-fact-grid">{[
+      ['Overall status', humanizeToken(o.status)], ['Providers', String(o.providers.length)], ['Total matches', String(o.total_matches)], ['Aggregated matches', String(o.matches.length)], ['Usable providers', String(usable)], ['Unavailable / failed', String(o.providers.length - usable)],
+    ].map(([key, value]) => <div className="live-fact" key={key}><span>{key}</span><strong>{value}</strong></div>)}</div>
+    <div className="live-subtitle-row"><span>Provider-by-provider intelligence</span><CountLabel count={o.providers.length} singular="provider" /></div>
+    <div className="live-provider-list">{o.providers.map(provider => <article className="live-provider-card" key={provider.source}>
+      <div className="live-provider-header"><div><strong>{provider.source}</strong><span>Query: {provider.query}</span></div><span className={`live-state live-state-${String(provider.status).toLowerCase()}`}>{humanizeToken(provider.status)}</span></div>
+      <div className="live-fact-grid compact"><div className="live-fact"><span>Matched</span><strong>{provider.matched ? 'Yes' : 'No'}</strong></div><div className="live-fact"><span>Match count</span><strong>{provider.match_count}</strong></div></div>
+      {provider.matches?.length ? <div className="live-match-list">{provider.matches.map((match,index) => <div className="live-match" key={`${match.source}-${match.indicator}-${index}`}><div><strong>{humanizeToken(match.match_type)}</strong><span>{match.indicator}</span></div>{match.reference && <a href={match.reference} target="_blank" rel="noreferrer">Reference ↗</a>}</div>)}</div> : <div className="live-provider-empty">No direct matches returned by this provider.</div>}
+      {provider.error && <div className="live-inline-note">{provider.error}</div>}
+      {Object.keys(provider.metadata || {}).length ? <details className="live-json-details"><summary>Provider metadata</summary><JsonTree value={sanitizeForDisplay(provider.metadata)} /></details> : null}
+    </article>)}</div>
+    <details className="live-json-details"><summary>Complete OSINT JSON</summary><JsonTree value={sanitizeForDisplay(o)} /></details>
+  </div>
+}
+
+const REPORT_SECTIONS = [
+  { kind: 'url', number: '01', eyebrow: 'URL FORENSICS', title: 'URL — All Parts', description: 'Every parser-returned URL component is shown, including authority, path, query parameters and fragment.' },
+  { kind: 'dns', number: '02', eyebrow: 'DNS INTELLIGENCE', title: 'DNS Information', description: 'Every hostname and domain record group returned by the resolver is displayed with its actual status.' },
+  { kind: 'ip', number: '03', eyebrow: 'NETWORK & GEOLOCATION', title: 'IP Information & Geolocation', description: 'Every IP object returned by the backend is displayed with its network and geolocation fields.' },
+  { kind: 'whois', number: '04', eyebrow: 'DOMAIN REGISTRY', title: 'WHOIS / RDAP Information', description: 'Registration lifecycle, registrar data, nameservers, DNSSEC and RDAP metadata.' },
+  { kind: 'osint', number: '05', eyebrow: 'OPEN-SOURCE INTELLIGENCE', title: 'OSINT — In Depth', description: 'Provider state, exact matches, references, metadata and errors from the live OSINT response.' },
+] as const
+
+function LiveReportCard({ config, raw, index }: { config: typeof REPORT_SECTIONS[number]; raw: BackendAnalysisResponse; index: number }): React.ReactElement {
+  const [open, setOpen] = useState(false)
+  const body = config.kind === 'url' ? <URLPartsReport raw={raw} /> : config.kind === 'dns' ? <DNSReport raw={raw} /> : config.kind === 'ip' ? <IPReport raw={raw} /> : config.kind === 'whois' ? <WhoisReport raw={raw} /> : <OSINTReport raw={raw} />
+  return <article className={`live-report-card ${open ? 'is-open' : ''}`} style={{ '--live-delay': `${index * 70}ms` } as React.CSSProperties}>
+    <div className="live-report-card-head"><div className="live-report-number">{config.number}</div><div className="live-report-heading"><span>{config.eyebrow}</span><h3>{config.title}</h3><p>{config.description}</p></div><button type="button" className="live-expand-btn" onClick={() => setOpen(value => !value)} aria-expanded={open}>{open ? 'Collapse' : 'Inspect'} ↗</button></div>
+    <div className="live-report-card-content">{body}</div>
+  </article>
+}
+
+function LiveRiskCircle({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
   const target = Math.max(0, Math.min(100, Number(raw.final_assessment?.risk_score ?? 0)))
-  const [displayed, setDisplayed] = useState(0)
-  const radius = 88
-  const stroke = 13
-  const circumference = 2 * Math.PI * (radius - stroke / 2)
-  const dash = circumference - (displayed / 100) * circumference
-  const tone = riskTone(target)
-
+  const [value, setValue] = useState(0)
+  const radius = 112
+  const circumference = 2 * Math.PI * radius
   useEffect(() => {
     let frame = 0
     const start = performance.now()
     const duration = 1500
-    if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      setDisplayed(target)
-      return
-    }
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { setValue(target); return () => undefined }
     const tick = (now: number) => {
-      const t = Math.min(1, (now - start) / duration)
-      const eased = 1 - Math.pow(1 - t, 4)
-      setDisplayed(Math.round(target * eased))
-      if (t < 1) frame = requestAnimationFrame(tick)
+      const progress = Math.min(1, (now - start) / duration)
+      const eased = 1 - Math.pow(1 - progress, 4)
+      setValue(Math.round(target * eased))
+      if (progress < 1) frame = requestAnimationFrame(tick)
     }
     frame = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(frame)
   }, [target])
-
-  return (
-    <div className={`risk-gauge risk-gauge-${tone}`}>
-      <div className="risk-gauge-orbit">
-        <div className="risk-gauge-scan-beam" aria-hidden="true" />
-        <svg viewBox="0 0 220 220" className="risk-gauge-svg" aria-label={`Backend risk index ${target} out of 100`}>
-          <circle cx="110" cy="110" r={radius - stroke / 2} fill="none" className="risk-gauge-track" strokeWidth={stroke} />
-          <circle cx="110" cy="110" r={radius - stroke / 2} fill="none" className="risk-gauge-value" strokeWidth={stroke} strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={dash} />
-        </svg>
-        <div className="risk-gauge-center">
-          <strong>{displayed}</strong>
-          <span>/ 100</span>
-          <small>RISK INDEX</small>
-          <em>LIVE BACKEND SCORE</em>
-        </div>
-      </div>
-      <div className="risk-scale"><span>0–20</span><span>21–60</span><span>61–100</span></div>
-      <RiskEvidenceContributors raw={raw} />
-    </div>
-  )
-}
-
-function compactSummaryForCard(kind: string, raw: BackendAnalysisResponse): Array<[string, string]> {
-  switch (kind) {
-    case 'url':
-      return [
-        ['Hostname', raw.url.hostname],
-        ['Domain', raw.url.registrable_domain || raw.url.domain || '—'],
-        ['Path', raw.url.path || '/'],
-        ['Query params', String(raw.url.query_parameters?.length || 0)],
-      ]
-    case 'dns':
-      return [
-        ['Status', humanizeToken(raw.dns.status)],
-        ['Resolved IPs', String(raw.dns.resolved_ips.length)],
-        ['Hostname records', String(Object.keys(raw.dns.hostname_records || {}).length)],
-        ['Domain records', String(Object.keys(raw.dns.domain_records || {}).length)],
-      ]
-    case 'ip':
-      return [
-        ['Total IPs', String(raw.ip_intelligence.total_ips)],
-        ['Public IPs', String(raw.ip_intelligence.public_ips)],
-        ['Enriched IPs', String(raw.ip_intelligence.enriched_ips)],
-        ['Lookup status', humanizeToken(raw.ip_intelligence.status)],
-      ]
-    case 'whois':
-      return [
-        ['Domain', raw.whois?.domain || raw.url.registrable_domain || '—'],
-        ['Registrar', raw.whois?.registrar_name || 'Not published'],
-        ['Created', raw.whois?.registration_date ? formatDate(raw.whois.registration_date) : 'Not published'],
-        ['DNSSEC', raw.whois?.dnssec || 'Not published'],
-      ]
-    case 'osint':
-      return [
-        ['Providers', String(raw.osint?.providers?.length || 0)],
-        ['Matches', String(raw.osint?.total_matches || 0)],
-        ['Status', humanizeToken(raw.osint?.status || 'unavailable')],
-        ['Configured', String(raw.osint?.providers?.filter(p => p.status !== 'not_configured').length || 0)],
-      ]
-    default:
-      return []
-  }
-}
-
-function AnalysisDataCard({
-  number,
-  title,
-  eyebrow,
-  kind,
-  raw,
-  payload,
-}: {
-  number: string
-  title: string
-  eyebrow: string
-  kind: string
-  raw: BackendAnalysisResponse
-  payload: Record<string, unknown>
-}): React.ReactElement {
-  const [expanded, setExpanded] = useState(false)
-  const summary = compactSummaryForCard(kind, raw)
-  const safePayload = normalizeDisplayData(payload)
-  return (
-    <article className={`analysis-data-card analysis-data-card-${kind} ${expanded ? 'is-expanded' : ''}`}>
-      <div className="data-card-topline">
-        <span className="data-card-number">{number}</span>
-        <span className="analysis-eyebrow">{eyebrow}</span>
-      </div>
-      <div className="data-card-title-row">
-        <h3>{title}</h3>
-        <span className="data-card-live-dot" />
-      </div>
-      <div className="data-card-summary-grid">
-        {summary.map(([label, value]) => (
-          <div className="data-card-summary-item" key={label}>
-            <span>{label}</span>
-            <strong title={value}>{value}</strong>
-          </div>
-        ))}
-      </div>
-      <button type="button" className="data-card-expand-btn" onClick={() => setExpanded(v => !v)} aria-expanded={expanded}>
-        <span>{expanded ? 'Collapse complete response' : 'Show complete response'}</span>
-        <span className={`data-card-chevron ${expanded ? 'rotated' : ''}`}>↓</span>
-      </button>
-      <div className={`data-card-json ${expanded ? 'data-card-json-open' : ''}`}>
-        <JsonTree value={safePayload} />
-      </div>
-    </article>
-  )
-}
-
-function AssessmentHero({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const tone = riskTone(target)
+  const offset = circumference - (value / 100) * circumference
   const assessment = raw.final_assessment
-  const score = Math.max(0, Math.min(100, Number(assessment?.risk_score ?? 0)))
-  const tone = riskTone(score)
-  const findings = collectBackendFindings(raw)
-  const high = findings.filter(f => f.severity === 'high').length
-  const medium = findings.filter(f => f.severity === 'medium').length
-  const matches = raw.osint?.total_matches || 0
-  const weightedEvents = (assessment?.risk_events || []).filter(event => Number(event.points || 0) > 0).length
-  const correlation = raw.correlation_security || { status: 'not_returned' }
-
-  return (
-    <section className={`analysis-risk-hero analysis-risk-tone-${tone}`}>
-      <div className="risk-hero-main">
-        <div className="assessment-topline">
-          <span className="live-dot" />
-          <span>FINAL EVIDENCE ASSESSMENT</span>
-          <span className="assessment-generated">Backend-derived · {assessment?.risk_score_version || 'risk index'}</span>
-        </div>
-        <div className="risk-hero-grid">
-          <div className="risk-hero-copy">
-            <div className="risk-hero-badges">
-              <span className="risk-verdict-badge">{assessmentLabel(assessment?.verdict)}</span>
-              <span className="assessment-confidence">{humanizeToken(assessment?.confidence || 'low')} confidence</span>
-            </div>
-            <h2>{raw.url.hostname}</h2>
-            <code className="risk-hero-url">{maskUrlForDisplay(raw.url.original, raw.url.query_parameters || [], raw.url.has_credentials)}</code>
-            <p className="assessment-summary">{assessment?.summary || 'No final assessment was returned.'}</p>
-            <div className="risk-metric-strip">
-              <div><strong>{findings.length}</strong><span>Total findings</span></div>
-              <div><strong>{high}</strong><span>High severity</span></div>
-              <div><strong>{medium}</strong><span>Medium severity</span></div>
-              <div><strong>{matches}</strong><span>OSINT matches</span></div>
-            </div>
-            <div className="risk-explanation-panel">
-              <div className="risk-explanation-heading"><span className="analysis-eyebrow">HOW THE LIVE INDEX WAS DERIVED</span><span>{weightedEvents} weighted contributors</span></div>
-              <p>The backend calculates this 0–100 evidence index from the current scan's security findings, direct threat-intelligence matches, contextual OSINT and cross-source correlation. It is not a probability.</p>
-              <RiskSignalGraph raw={raw} />
-            </div>
-          </div>
-          <RiskGauge raw={raw} />
-        </div>
-      </div>
-      <div className="risk-hero-rationale">
-        <div className="analysis-eyebrow">WHY THE ENGINE LANDED HERE</div>
-        {(assessment?.rationale || []).length ? (assessment?.rationale || []).map((item, index) => (
-          <div className="rationale-row" key={index}><span>{String(index + 1).padStart(2, '0')}</span><p>{item}</p></div>
-        )) : <p className="rationale-empty">No rationale items were returned.</p>}
-        <details className="hero-correlation-details">
-          <summary>Show correlation-security payload</summary>
-          <JsonTree value={normalizeDisplayData(correlation)} />
-        </details>
-        <details className="hero-correlation-details">
-          <summary>Show complete risk-engine payload</summary>
-          <JsonTree value={normalizeDisplayData({ risk_score: assessment?.risk_score, risk_dimensions: assessment?.risk_dimensions, risk_factors: assessment?.risk_factors, risk_events: assessment?.risk_events })} />
-        </details>
-      </div>
-    </section>
-  )
+  return <div className={`live-risk-card live-risk-${tone}`}>
+    <div className="live-risk-heading"><span>LIVE RISK INDEX</span><strong>{assessment?.risk_score_version || 'backend score'}</strong></div>
+    <div className="live-risk-orbit"><div className="live-risk-pulse" /><svg viewBox="0 0 260 260" className="live-risk-svg" aria-label={`Risk index ${target} out of 100`}><circle cx="130" cy="130" r={radius} fill="none" className="live-risk-track" strokeWidth="17"/><circle cx="130" cy="130" r={radius} fill="none" className="live-risk-value" strokeWidth="17" strokeLinecap="round" strokeDasharray={circumference} strokeDashoffset={offset}/></svg><div className="live-risk-center"><strong>{value}</strong><span>/ 100</span><small>{assessmentLabel(assessment?.verdict)}</small></div></div>
+    <div className="live-risk-meta"><div><span>Confidence</span><strong>{assessment?.confidence || 'not returned'}</strong></div><div><span>Source</span><strong>Current API response</strong></div></div>
+    <p className="live-risk-note">The circle animates to the exact <code>final_assessment.risk_score</code> returned for this URL. It is an evidence index, not a probability.</p>
+  </div>
 }
 
-// Lightweight native PDF generator so users can download a self-contained report
-// without adding a heavy browser-side PDF dependency.
-function downloadAnalysisPdf(raw: BackendAnalysisResponse): void {
-  const esc = (value: string) => value.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)').replace(/[^\x20-\x7E]/g, '?')
-  const wrap = (value: string, max = 92): string[] => {
-    const words = value.split(/\s+/)
-    const lines: string[] = []
-    let line = ''
-    for (const word of words) {
-      if (!word) continue
-      const candidate = line ? `${line} ${word}` : word
-      if (candidate.length > max && line) { lines.push(line); line = word }
-      else line = candidate
-    }
-    if (line) lines.push(line)
-    return lines.length ? lines : ['']
-  }
-
-  type PdfLine = { text: string; size: number; bold?: boolean; gapAfter?: number }
-  const pages: PdfLine[][] = [[]]
-  const push = (line: PdfLine) => {
-    const page = pages[pages.length - 1]
-    const currentChars = page.length
-    if (currentChars > 44) pages.push([])
-    pages[pages.length - 1].push(line)
-  }
-  const paragraph = (text: string, size = 10, bold = false) => wrap(text).forEach((line, index, arr) => push({ text: line, size, bold, gapAfter: index === arr.length - 1 ? 5 : 0 }))
-  const heading = (text: string) => { if (pages[pages.length - 1].length) pages.push([]); push({ text, size: 16, bold: true, gapAfter: 8 }) }
-
-  push({ text: 'PHISHGUARD', size: 22, bold: true, gapAfter: 4 })
-  push({ text: 'URL intelligence report', size: 13, gapAfter: 15 })
-  paragraph(`Submitted: ${raw.url.original}`)
-  paragraph(`Normalized: ${raw.url.normalized}`)
-  paragraph(`Assessment: ${assessmentLabel(raw.final_assessment?.verdict)} / ${raw.final_assessment?.confidence || 'unknown'} confidence`, 11, true)
-  paragraph(`Risk index: ${raw.final_assessment?.risk_score ?? 0}/100 (${raw.final_assessment?.risk_score_version || 'evidence-derived'})`, 11, true)
-  paragraph(`Risk factors: ${JSON.stringify(raw.final_assessment?.risk_factors || {})}`)
-  paragraph(`Risk dimensions: ${JSON.stringify(raw.final_assessment?.risk_dimensions || {})}`)
-  paragraph(`Top contributors: ${JSON.stringify(raw.final_assessment?.risk_events || [])}`)
-  paragraph(raw.final_assessment?.summary || 'No summary returned.')
-
-  heading('01  URL decomposition')
-  const u = raw.url
-  const parts = [
-    ['Scheme', `${u.scheme}://`], ['Subdomain', u.subdomain || '-'], ['Domain', u.domain || u.registrable_domain || u.hostname],
-    ['TLD', u.tld || '-'], ['Port', u.port ? String(u.port) : 'Default / not explicit'], ['Path', u.path || '/'],
-    ['Query', u.query || '-'], ['Fragment', u.fragment || '-'], ['Credentials', u.has_credentials ? 'Present (redacted)' : 'None'],
-  ]
-  parts.forEach(([k, v]) => paragraph(`${k}: ${isLikelySensitiveParam(k) ? '********' : v}`))
-  if (u.query_parameters?.length) {
-    paragraph('Query parameters:', 10, true)
-    u.query_parameters.forEach(q => paragraph(`  ${q.name} = ${displayQueryParamValue(q)}`))
-  }
-
-  heading('02  DNS intelligence')
-  paragraph(`Status: ${humanizeToken(raw.dns.status)}`)
-  paragraph(`Resolved IPs: ${raw.dns.resolved_ips.join(', ') || 'None returned'}`)
-  Object.entries(raw.dns.hostname_records || {}).forEach(([type, record]) => paragraph(`${type}: ${record.records.join(', ') || record.error || record.status}`))
-  Object.entries(raw.dns.domain_records || {}).forEach(([type, record]) => paragraph(`Domain ${type}: ${record.records.join(', ') || record.error || record.status}`))
-
-  heading('03  IP intelligence & geolocation')
-  raw.ip_intelligence.results.forEach(ip => {
-    paragraph(`${ip.ip} (${ip.version}) - ${humanizeToken(ip.classification)} - ${humanizeToken(ip.status)}`, 10, true)
-    paragraph(`Location: ${[ip.city, ip.region, ip.country_name].filter(Boolean).join(', ') || 'Not published'} | ASN: ${ip.asn || '-'} | Org: ${ip.organization || '-'}`)
-    paragraph(`Coordinates: ${ip.latitude ?? '-'}, ${ip.longitude ?? '-'} | Timezone: ${ip.timezone || '-'}`)
-  })
-
-  heading('04  WHOIS / RDAP')
-  if (raw.whois) {
-    paragraph(`Domain: ${raw.whois.domain}`)
-    paragraph(`Status: ${humanizeToken(raw.whois.status)}`)
-    paragraph(`Registrar: ${raw.whois.registrar_name || 'Not published'}`)
-    paragraph(`Registered: ${raw.whois.registration_date || 'Not published'}`)
-    paragraph(`Expires: ${raw.whois.expiration_date || 'Not published'}`)
-    paragraph(`Updated: ${raw.whois.last_updated_date || 'Not published'}`)
-    paragraph(`DNSSEC: ${raw.whois.dnssec || 'Not published'} | Redacted: ${raw.whois.redacted ? 'Yes' : 'No'}`)
-    paragraph(`Nameservers: ${(raw.whois.nameservers || []).map(n => n.hostname).join(', ') || 'Not published'}`)
-  } else paragraph('WHOIS / RDAP data was not available for this analysis.')
-
-  heading('05  OSINT')
-  ;(raw.osint?.providers || []).forEach(provider => {
-    paragraph(`${provider.source}: ${humanizeToken(provider.status)} | ${provider.match_count} matches`, 10, true)
-    provider.matches.slice(0, 8).forEach(match => paragraph(`  ${humanizeToken(match.match_type)}: ${match.indicator}`))
-  })
-
-  heading('06  Security findings')
-  const findingSets = [raw.security, raw.dns_security, raw.ip_security, raw.whois_security, raw.osint_security, raw.correlation_security]
-  const allFindings = findingSets.flatMap(r => r?.findings || []).sort((a,b) => severityRank(b.severity)-severityRank(a.severity))
-  if (!allFindings.length) paragraph('No actionable security findings were returned.')
-  allFindings.forEach((f, i) => {
-    paragraph(`${i + 1}. [${f.severity.toUpperCase()}] ${f.title}`, 10, true)
-    paragraph(f.description)
-    formatFindingEvidence(f.evidence).slice(0, 3).forEach(e => paragraph(`  ${e}`))
-  })
-
-  heading('07  Assessment rationale & coverage')
-  ;(raw.final_assessment?.rationale || []).forEach(r => paragraph(`- ${r}`))
-  paragraph(`Coverage: ${JSON.stringify(raw.final_assessment?.coverage || {})}`)
-  paragraph(`Evidence summary: ${JSON.stringify(raw.final_assessment?.evidence_summary || {})}`)
-  paragraph('Generated by PhishGuard. This report reflects evidence returned at analysis time and does not execute the destination webpage.')
-
-  // Construct a classic PDF 1.4 document using only ASCII primitives.
-  const objects: string[] = []
-  const addObject = (body: string) => { objects.push(body); return objects.length }
-  const fontRegular = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>')
-  const fontBold = addObject('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>')
-  const pageIds: number[] = []
-
-  for (const pageLines of pages) {
-    let y = 748
-    const commands: string[] = []
-    commands.push('q 0.95 0.93 0.88 rg 40 726 532 1 re f Q')
-    for (const line of pageLines) {
-      if (y < 50) break
-      const font = line.bold ? '/F2' : '/F1'
-      commands.push(`BT ${font} ${line.size} Tf 0.08 0.08 0.07 rg 40 ${y} Td (${esc(line.text)}) Tj ET`)
-      y -= line.size + 5 + (line.gapAfter || 0)
-    }
-    const stream = commands.join('\n')
-    const contentId = addObject(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`)
-    const pageId = addObject(`<< /Type /Page /Parent PAGES /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${fontRegular} 0 R /F2 ${fontBold} 0 R >> >> /Contents ${contentId} 0 R >>`)
-    pageIds.push(pageId)
-  }
-
-  const pagesId = addObject(`<< /Type /Pages /Count ${pageIds.length} /Kids [${pageIds.map(id => `${id} 0 R`).join(' ')}] >>`)
-  const patchedObjects = objects.map(obj => obj.replaceAll('PAGES', `${pagesId} 0 R`))
-  objects.splice(0, objects.length, ...patchedObjects)
-  const catalogId = addObject(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`)
-
-  let pdf = '%PDF-1.4\n%\xFF\xFF\xFF\xFF\n'
-  const offsets: number[] = [0]
-  for (let i = 0; i < objects.length; i++) {
-    offsets[i + 1] = new TextEncoder().encode(pdf).length
-    pdf += `${i + 1} 0 obj\n${objects[i]}\nendobj\n`
-  }
-  const xrefOffset = new TextEncoder().encode(pdf).length
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
-  for (let i = 1; i <= objects.length; i++) pdf += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`
-
-  const blob = new Blob([pdf], { type: 'application/pdf' })
-  const anchor = document.createElement('a')
-  anchor.href = URL.createObjectURL(blob)
-  anchor.download = `phishguard-report-${new Date().toISOString().replace(/[:.]/g, '-')}.pdf`
-  anchor.click()
-  setTimeout(() => URL.revokeObjectURL(anchor.href), 1000)
+function AssessmentReport({ raw }: { raw: BackendAnalysisResponse }): React.ReactElement {
+  const assessment = raw.final_assessment
+  const buckets = [raw.security, raw.dns_security, raw.ip_security, raw.whois_security, raw.osint_security, raw.correlation_security]
+  const findings = buckets.flatMap(bucket => bucket?.findings || [])
+  const osintMatches = Number(raw.osint?.total_matches || 0)
+  return <section className="live-assessment-wrap">
+    <div className="live-assessment-copy"><div className="live-assessment-top"><span className="live-eyebrow">FINAL EVIDENCE ASSESSMENT</span><span className="live-live-pill"><i /> LIVE API RESULT</span></div>
+      <div className="live-verdict-row"><span className={`live-verdict live-verdict-${riskTone(Number(assessment?.risk_score || 0))}`}>{assessmentLabel(assessment?.verdict)}</span><span className="live-confidence">{assessment?.confidence || 'not returned'} confidence</span></div>
+      <h2>{raw.url.hostname}</h2><code className="live-assessment-url">{maskUrlForDisplay(raw.url.original, raw.url.query_parameters || [], raw.url.has_credentials)}</code>
+      <p className="live-assessment-summary">{assessment?.summary || 'The backend did not return an assessment summary.'}</p>
+      <div className="live-metric-row"><div><strong>{findings.length}</strong><span>Total findings</span></div><div><strong>{findings.filter(f => f.severity === 'high').length}</strong><span>High severity</span></div><div><strong>{findings.filter(f => f.severity === 'medium').length}</strong><span>Medium severity</span></div><div><strong>{osintMatches}</strong><span>OSINT matches</span></div></div>
+      {assessment?.rationale?.length ? <div className="live-rationale-box"><div className="live-subtitle-row"><span>Why the engine landed here</span><CountLabel count={assessment.rationale.length} singular="rationale item" /></div>{assessment.rationale.map((item,index)=><div className="live-rationale" key={index}><span>{String(index+1).padStart(2,'0')}</span><p>{item}</p></div>)}</div> : null}
+      <details className="live-json-details"><summary>Complete final-assessment JSON</summary><JsonTree value={sanitizeForDisplay(assessment)} /></details>
+    </div><LiveRiskCircle raw={raw}/>
+  </section>
 }
 
-function AnalysisPage({
-  activeUrl,
-  analysisState,
-  analysisResult,
-  analysisError,
-  onStartInspection,
-  onResetScan,
-}: {
-  activeUrl: string | null
-  analysisState: ScanState
-  analysisResult: BackendAnalysisResponse | null
-  analysisError?: string | null
-  onStartInspection: (url: string) => void
-  onResetScan: () => void
-}) {
+function AnalysisPage({ activeUrl, analysisState, analysisResult, analysisError, onStartInspection, onResetScan }: { activeUrl: string | null; analysisState: ScanState; analysisResult: BackendAnalysisResponse | null; analysisError?: string | null; onStartInspection: (url:string)=>void; onResetScan:()=>void }) {
   const [activeStepIndex, setActiveStepIndex] = useState(0)
   const [scanProgress, setScanProgress] = useState(4)
-
   useEffect(() => {
     if (analysisState !== 'scanning' || !activeUrl) return
-    setActiveStepIndex(0)
-    setScanProgress(4)
+    setActiveStepIndex(0); setScanProgress(4)
     let current = 0
-    const timer = setInterval(() => {
-      current += 1
-      setActiveStepIndex(Math.min(SCAN_STEPS.length - 1, current))
-      setScanProgress(Math.min(92, Math.round((current / SCAN_STEPS.length) * 92)))
-      if (current >= SCAN_STEPS.length - 1) clearInterval(timer)
-    }, 650)
-    return () => clearInterval(timer)
+    const timer = window.setInterval(() => { current += 1; setActiveStepIndex(Math.min(SCAN_STEPS.length - 1, current)); setScanProgress(Math.min(94, Math.round((current / SCAN_STEPS.length) * 94))); if (current >= SCAN_STEPS.length - 1) window.clearInterval(timer) }, 650)
+    return () => window.clearInterval(timer)
   }, [analysisState, activeUrl])
-
-  return (
-    <div className="page-view analysis-page-view">
-      <section className="section analysis-hub-section">
-        <div className="section-container analysis-container">
-          <div className="section-intro reveal-stagger-1">
-            <span className="editorial-eyebrow">LIVE URL INSPECTION / ANALYSIS DOSSIER</span>
-            <h2 className="section-title">See the URL. See the evidence. Understand the verdict.</h2>
-            <p className="section-subtitle">PhishGuard turns one suspicious link into a visual intelligence report across URL structure, DNS, IP geolocation, RDAP and external threat-intelligence evidence.</p>
-          </div>
-
-          <div className="analysis-inspector-wrapper reveal-stagger-2">
-            <UrlInspectorCard initialUrl={activeUrl || ''} onInspect={onStartInspection} isInspecting={analysisState === 'scanning'} />
-          </div>
-
-          {analysisState === 'scanning' && activeUrl && (
-            <div className="analysis-live-scanning-card reveal-stagger-2" aria-live="polite">
-              <div className="scanning-card-header">
-                <div className="scanning-pulse-box"><SearchPulseIcon /></div>
-                <div className="scanning-header-titles">
-                  <span className="scanning-status-pill">NON-EXECUTING ANALYSIS IN PROGRESS</span>
-                  <h3 className="scanning-target-url"><code>{activeUrl}</code></h3>
-                </div>
-                <div className="scanning-pct-badge">{scanProgress}%</div>
-              </div>
-              <div className="progress-track-bar"><div className="progress-fill-bar" style={{ width: `${scanProgress}%` }} /></div>
-              <div className="sequence-steps-grid analysis-scan-grid">
-                {SCAN_STEPS.map((step, idx) => {
-                  const isDone = idx < activeStepIndex
-                  const isCurrent = idx === activeStepIndex
-                  return (
-                    <div key={step.id} className={`step-item ${isDone ? 'step-done' : ''} ${isCurrent ? 'step-active' : ''}`}>
-                      <div className="step-num-badge">{isDone ? '✓' : step.id}</div>
-                      <div className="step-text-wrap"><span className="step-name">{step.name}</span><span className="step-desc">{step.desc}</span></div>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          {analysisState === 'idle' && !analysisResult && (
-            <div className="analysis-empty-compact-card reveal-stagger-2">
-              <div className="empty-compact-content"><div className="empty-compact-badge-row"><span className="empty-status-dot" /><span className="empty-compact-pill">STANDBY MODE</span></div><h3 className="empty-compact-title">No URL inspected yet.</h3><p className="empty-compact-desc">Enter a URL above to generate its complete intelligence dossier.</p></div>
-              <div className="empty-compact-action"><button type="button" className="btn btn-primary btn-sm" onClick={onResetScan}>Go to Scanner <ArrowUpRight /></button></div>
-            </div>
-          )}
-
-          {analysisState === 'error' && (
-            <div className="analysis-error-card" role="alert">
-              <div className="error-card-icon">!</div>
-              <div><span className="analysis-eyebrow">BACKEND SERVICE ERROR</span><h3>Analysis could not be completed.</h3><p>{analysisError || 'The FastAPI analysis service did not return a usable result.'}</p><div className="error-card-actions"><button type="button" className="btn btn-primary btn-sm" onClick={() => activeUrl && onStartInspection(activeUrl)}>Retry Analysis <ArrowUpRight /></button><button type="button" className="btn btn-outline btn-sm" onClick={onResetScan}>Scan Another URL</button></div></div>
-            </div>
-          )}
-
-          {analysisState === 'completed' && analysisResult && (
-            <div className="analysis-report-shell">
-              <div className="analysis-report-toolbar">
-                <div><span className="analysis-eyebrow">REPORT READY</span><span className="analysis-toolbar-url"><code>{analysisResult.url.hostname}</code></span></div>
-                <div className="analysis-toolbar-actions">
-                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => window.print()}>Print</button>
-                  <button type="button" className="btn btn-primary btn-sm" onClick={() => downloadAnalysisPdf(analysisResult)}>Download PDF ↓</button>
-                  <button type="button" className="btn btn-outline btn-sm" onClick={onResetScan}>New Scan</button>
-                </div>
-              </div>
-
-              <AssessmentHero raw={analysisResult} />
-
-              <div className="analysis-five-card-grid">
-                <AnalysisDataCard
-                  number="01"
-                  eyebrow="URL FORENSICS"
-                  title="URL — All Parts"
-                  kind="url"
-                  raw={analysisResult}
-                  payload={{ url: analysisResult.url, security: analysisResult.security }}
-                />
-                <AnalysisDataCard
-                  number="02"
-                  eyebrow="DNS INTELLIGENCE"
-                  title="DNS Information"
-                  kind="dns"
-                  raw={analysisResult}
-                  payload={{ dns: analysisResult.dns, dns_security: analysisResult.dns_security }}
-                />
-                <AnalysisDataCard
-                  number="03"
-                  eyebrow="NETWORK & GEOLOCATION"
-                  title="IP Information & Geolocation"
-                  kind="ip"
-                  raw={analysisResult}
-                  payload={{ ip_intelligence: analysisResult.ip_intelligence, ip_security: analysisResult.ip_security }}
-                />
-                <AnalysisDataCard
-                  number="04"
-                  eyebrow="DOMAIN REGISTRY"
-                  title="WHOIS / RDAP Information"
-                  kind="whois"
-                  raw={analysisResult}
-                  payload={{ whois: analysisResult.whois, whois_security: analysisResult.whois_security }}
-                />
-                <AnalysisDataCard
-                  number="05"
-                  eyebrow="OPEN-SOURCE INTELLIGENCE"
-                  title="OSINT — In Depth"
-                  kind="osint"
-                  raw={analysisResult}
-                  payload={{ osint: analysisResult.osint, osint_security: analysisResult.osint_security }}
-                />
-              </div>
-
-              <div className="analysis-evidence-footer-panel">
-                <div>
-                  <span className="analysis-eyebrow">COMPLETE BACKEND EVIDENCE</span>
-                  <h3>Nothing is hard-coded into this report.</h3>
-                  <p>The five panels above are populated from the live JSON returned by FastAPI. Security findings, provider states, RDAP events, DNS records, IP enrichment, OSINT matches, correlation evidence and coverage remain tied to the current scan.</p>
-                </div>
-                <details>
-                  <summary>Inspect final assessment &amp; coverage payload</summary>
-                  <JsonTree value={normalizeDisplayData({ final_assessment: analysisResult.final_assessment })} />
-                </details>
-              </div>
-
-              <div className="analysis-bottom-cta"><div><span className="analysis-eyebrow">NEXT INSPECTION</span><h3>Have another suspicious link?</h3><p>Run a fresh non-executing analysis with the same evidence pipeline.</p></div><button type="button" className="btn btn-primary" onClick={onResetScan}>Scan another URL <ArrowUpRight /></button></div>
-            </div>
-          )}
-        </div>
-      </section>
-    </div>
-  )
+  return <div className="page-view analysis-page-view"><section className="section analysis-hub-section"><div className="section-container live-report-container">
+    <div className="section-intro"><span className="editorial-eyebrow">LIVE URL INSPECTION / ANALYSIS DOSSIER</span><h2 className="section-title">Professional evidence report from the URL you submit.</h2><p className="section-subtitle">Every value below is taken from the current FastAPI analysis response. There are no embedded scan results.</p></div>
+    <div className="analysis-inspector-wrapper"><UrlInspectorCard initialUrl={activeUrl || ''} onInspect={onStartInspection} isInspecting={analysisState === 'scanning'} /></div>
+    {analysisState === 'scanning' && activeUrl ? <div className="analysis-live-scanning-card"><div className="scanning-card-header"><div className="scanning-pulse-box"><SearchPulseIcon /></div><div className="scanning-header-titles"><span className="scanning-status-pill">NON-EXECUTING ANALYSIS IN PROGRESS</span><h3 className="scanning-target-url"><code>{activeUrl}</code></h3></div><div className="scanning-pct-badge">{scanProgress}%</div></div><div className="progress-track-bar"><div className="progress-fill-bar" style={{width:`${scanProgress}%`}}/></div><div className="sequence-steps-grid analysis-scan-grid">{SCAN_STEPS.map((step,index)=>{const done=index<activeStepIndex;const current=index===activeStepIndex;return <div key={step.id} className={`step-item ${done?'step-done':''} ${current?'step-active':''}`}><div className="step-num-badge">{done?'✓':step.id}</div><div className="step-text-wrap"><span className="step-name">{step.name}</span><span className="step-desc">{step.desc}</span></div></div>})}</div></div> : null}
+    {analysisState === 'idle' && !analysisResult ? <div className="analysis-empty-compact-card"><div className="empty-compact-content"><div className="empty-compact-badge-row"><span className="empty-status-dot"/><span className="empty-compact-pill">STANDBY MODE</span></div><h3 className="empty-compact-title">No URL inspected yet.</h3><p className="empty-compact-desc">Enter a URL above to generate a complete live report.</p></div></div> : null}
+    {analysisState === 'error' ? <div className="analysis-error-card" role="alert"><div className="error-card-icon">!</div><div><span className="analysis-eyebrow">BACKEND SERVICE ERROR</span><h3>Analysis could not be completed.</h3><p>{analysisError || 'The FastAPI service did not return a usable result.'}</p><div className="error-card-actions"><button type="button" className="btn btn-primary btn-sm" onClick={()=>activeUrl&&onStartInspection(activeUrl)}>Retry Analysis <ArrowUpRight /></button><button type="button" className="btn btn-outline btn-sm" onClick={onResetScan}>Scan Another URL</button></div></div></div> : null}
+    {analysisState === 'completed' && analysisResult ? <div className="live-report-shell"><div className="live-report-toolbar"><div><span className="live-eyebrow">REPORT READY</span><span className="live-toolbar-url">{analysisResult.url.hostname}</span></div><div className="analysis-toolbar-actions"><button type="button" className="btn btn-secondary btn-sm" onClick={()=>window.print()}>Print / Save PDF</button><button type="button" className="btn btn-outline btn-sm" onClick={onResetScan}>New Scan</button></div></div>
+      <AssessmentReport raw={analysisResult}/>
+      <div className="live-five-stack">{REPORT_SECTIONS.map((config,index)=><LiveReportCard key={config.kind} config={config} index={index} raw={analysisResult}/>)}</div>
+      <section className="live-engine-section"><div className="live-engine-head"><span className="live-eyebrow">ADDITIONAL BACKEND OUTPUT</span><h3>Security and correlation evidence.</h3><p>The five primary sections above cover the intelligence payload. These expandable panels expose the rest of the returned analysis objects so nothing is silently discarded.</p></div><div className="live-engine-grid">{[
+        ['URL security', analysisResult.security], ['DNS security', analysisResult.dns_security], ['IP security', analysisResult.ip_security], ['WHOIS security', analysisResult.whois_security], ['OSINT security', analysisResult.osint_security], ['Cross-source correlation', analysisResult.correlation_security],
+      ].map(([label,data])=><details className="live-json-details live-engine-detail" key={label as string}><summary>{label as string}</summary><JsonTree value={sanitizeForDisplay(data)}/></details>)}</div></section>
+      <div className="analysis-bottom-cta"><div><span className="analysis-eyebrow">NEXT INSPECTION</span><h3>Have another suspicious link?</h3><p>Run another non-executing scan using the same live backend pipeline.</p></div><button type="button" className="btn btn-primary" onClick={onResetScan}>Scan another URL <ArrowUpRight /></button></div>
+    </div> : null}
+  </div></section></div>
 }
-
 // --------------------------------------------------------------------------
+
 // PAGE 3: BLOG (/blog)
 // --------------------------------------------------------------------------
 interface BlogArticle {
@@ -4308,6 +3439,9 @@ export default function App() {
       }
 
       const raw = (await response.json()) as BackendAnalysisResponse
+      if (!raw?.success || !raw?.url || !raw?.final_assessment) {
+        throw new Error('The backend returned an incomplete analysis response.')
+      }
       setAnalysisResult(raw)
       setAnalysisError(null)
       setAnalysisState('completed')
@@ -4320,7 +3454,7 @@ export default function App() {
         // Backend responded: show its real reason (e.g. invalid URL), not a "server down" hint.
         message = (error as Error).message
       } else {
-        message = 'Could not reach the analysis server. Check that the FastAPI server is running at the configured backend URL.'
+        message = 'Could not reach the analysis server. Check that the FastAPI server is running at http://127.0.0.1:8000.'
       }
       setAnalysisError(message)
       setAnalysisResult(null)
