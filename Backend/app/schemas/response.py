@@ -1,4 +1,4 @@
-from typing import Literal, Optional
+from typing import Any, Literal , Optional
 
 from pydantic import BaseModel, Field
 
@@ -478,6 +478,95 @@ class WhoisResult(BaseModel):
     error: Optional[str] = None
 
 # =========================================================
+# OSINT
+# =========================================================
+
+OSINTProviderStatus = Literal[
+    "success",
+    "no_match",
+    "not_configured",
+    "rate_limited",
+    "timeout",
+    "unauthorized",
+    "error",
+]
+
+
+OSINTOverallStatus = Literal[
+    "completed",
+    "partial",
+    "no_matches",
+    "not_configured",
+    "error",
+]
+
+
+class OSINTMatch(BaseModel):
+    """
+    One piece of evidence returned by an OSINT provider.
+
+    This is evidence only.
+
+    It does not represent PhishGuard's final threat score.
+    """
+
+    source: str
+
+    match_type: str
+
+    indicator: str
+
+    reference: Optional[str] = None
+
+    details: dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+
+class OSINTProviderResult(BaseModel):
+    """
+    Normalized result from one OSINT provider.
+    """
+
+    source: str
+
+    status: OSINTProviderStatus
+
+    query: str
+
+    matched: bool = False
+
+    match_count: int = 0
+
+    matches: list[OSINTMatch] = Field(
+        default_factory=list
+    )
+
+    metadata: dict[str, Any] = Field(
+        default_factory=dict
+    )
+
+    error: Optional[str] = None
+
+
+class OSINTResult(BaseModel):
+    """
+    Aggregated OSINT result across all providers.
+    """
+
+    status: OSINTOverallStatus
+
+    providers: list[OSINTProviderResult] = Field(
+        default_factory=list
+    )
+
+    matches: list[OSINTMatch] = Field(
+        default_factory=list
+    )
+
+    total_matches: int = 0
+
+# =========================================================
 # FINAL ANALYSIS RESPONSE
 # =========================================================
 
@@ -491,3 +580,5 @@ class AnalysisResponse(BaseModel):
     ip_intelligence: IPIntelligenceResponse
 
     whois: Optional[WhoisResult] = None
+    
+    osint: Optional[OSINTResult] = None

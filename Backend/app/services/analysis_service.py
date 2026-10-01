@@ -3,6 +3,7 @@ from app.services.dns_service import DNSService
 from app.services.ip_service import IPService
 from app.services.url_parser import parse_url
 from app.services.whois_service import WhoisService
+from app.services.osint_service import OSINTService
 
 
 # =========================================================
@@ -14,6 +15,8 @@ dns_service = DNSService()
 ip_service = IPService()
 
 whois_service = WhoisService()
+
+osint_service = OSINTService()
 
 
 # =========================================================
@@ -38,7 +41,9 @@ async def analyze_url(
 
     dns_result = await dns_service.lookup(
         hostname=parsed_url.hostname,
-        registrable_domain=parsed_url.registrable_domain,
+        registrable_domain=(
+            parsed_url.registrable_domain
+        ),
     )
 
     # =====================================================
@@ -54,21 +59,18 @@ async def analyze_url(
     # =====================================================
     # STEP 4 — WHOIS / RDAP
     # =====================================================
-    #
-    # IMPORTANT:
-    #
-    # We use the registrable domain rather than the full
-    # hostname.
-    #
-    # www.example.com
-    #        ↓
-    # example.com
-    #
-    # This is the registration object we want.
-    # =====================================================
 
     whois_result = await whois_service.lookup(
         parsed_url.registrable_domain
+    )
+
+    # =====================================================
+    # STEP 5 — OSINT
+    # =====================================================
+
+    osint_result = await osint_service.lookup(
+        url=parsed_url.original,
+        domain=parsed_url.registrable_domain,
     )
 
     # =====================================================
@@ -78,11 +80,18 @@ async def analyze_url(
     return AnalysisResponse(
         success=True,
 
+        # Existing Step 1
         url=parsed_url,
 
+        # Existing Step 2
         dns=dns_result,
 
+        # Existing Step 3
         ip_intelligence=ip_intelligence,
 
+        # Existing Step 4
         whois=whois_result,
+
+        # New Step 5
+        osint=osint_result,
     )
