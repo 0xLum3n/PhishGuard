@@ -1,10 +1,5 @@
-from fastapi import FastAPI,Response,status,HTTPException,APIRouter
-import whois
-import os
-from pydantic import BaseModel
+"""Backward-compatible import location for the analysis router."""
 
-router = APIRouter(
-    prefix ="/api",
-    tags=['']
-)
+from app.api.routes.analysis import router
 
+__all__ = ["router"]

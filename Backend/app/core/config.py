@@ -70,17 +70,33 @@ class Settings:
     hard-coded into the application.
     """
 
+    # -----------------------------------------------------
+    # PhishTank
+    # -----------------------------------------------------
+
     PHISHTANK_APP_KEY = os.getenv(
         "PHISHTANK_APP_KEY"
     )
+
+    # -----------------------------------------------------
+    # URLhaus
+    # -----------------------------------------------------
 
     URLHAUS_AUTH_KEY = os.getenv(
         "URLHAUS_AUTH_KEY"
     )
 
+    # -----------------------------------------------------
+    # urlscan.io
+    # -----------------------------------------------------
+
     URLSCAN_API_KEY = os.getenv(
         "URLSCAN_API_KEY"
     )
+
+    # -----------------------------------------------------
+    # OSINT
+    # -----------------------------------------------------
 
     OSINT_TIMEOUT = _get_float(
         "OSINT_TIMEOUT",
@@ -96,6 +112,23 @@ class Settings:
         "PHISHGUARD_USER_AGENT",
         "PhishGuard/0.1",
     )
+
+    # -----------------------------------------------------
+    # Lowercase compatibility aliases
+    # -----------------------------------------------------
+    #
+    # Providers use these names.
+    # Keep the uppercase names above because they are part
+    # of the existing configuration contract.
+    # -----------------------------------------------------
+
+    phishtank_app_key = PHISHTANK_APP_KEY
+    urlhaus_auth_key = URLHAUS_AUTH_KEY
+    urlscan_api_key = URLSCAN_API_KEY
+
+    osint_timeout = OSINT_TIMEOUT
+    urlscan_max_results = URLSCAN_MAX_RESULTS
+    user_agent = USER_AGENT
 
 
 settings = Settings()

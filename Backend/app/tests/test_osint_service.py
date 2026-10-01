@@ -1,5 +1,7 @@
 import pytest
 
+from app.providers.phishtank import PhishTankProvider
+from app.providers.urlscan import URLScanProvider
 from app.schemas.response import (
     OSINTMatch,
     OSINTProviderResult,
@@ -301,3 +303,51 @@ async def test_empty_provider_list():
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+# =========================================================
+# Provider-specific lookup contracts
+# =========================================================
+
+class FakeConcretePhishTank(PhishTankProvider):
+    async def lookup(self, url):
+        return OSINTProviderResult(
+            source="FakeConcretePhishTank",
+            status="no_match",
+            query=url,
+        )
+
+
+class FakeConcreteURLScan(URLScanProvider):
+    async def lookup(
+        self,
+        url,
+        hostname=None,
+        registrable_domain=None,
+    ):
+        return OSINTProviderResult(
+            source="FakeConcreteURLScan",
+            status="no_match",
+            query=registrable_domain or hostname or url,
+        )
+
+
+@pytest.mark.anyio
+async def test_provider_lookup_adapter_preserves_concrete_contracts():
+    service = OSINTService(
+        providers=[
+            FakeConcretePhishTank(),
+            FakeConcreteURLScan(),
+        ]
+    )
+
+    result = await service.lookup(
+        url="https://www.example.com/login",
+        domain="example.com",
+    )
+
+    assert result.status == "no_matches"
+    assert len(result.providers) == 2
+    assert all(
+        provider.status == "no_match"
+        for provider in result.providers
+    )

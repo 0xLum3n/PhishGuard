@@ -1,4 +1,4 @@
-from typing import Any, Literal , Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -488,6 +488,9 @@ OSINTProviderStatus = Literal[
     "rate_limited",
     "timeout",
     "unauthorized",
+    "forbidden",
+    "invalid_request",
+    "upstream_error",
     "error",
 ]
 
